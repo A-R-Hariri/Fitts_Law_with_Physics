@@ -1,5 +1,6 @@
 import numpy as np
 import time
+from copy import deepcopy
 import os
 import sys
 import csv
@@ -32,7 +33,7 @@ class SharedContext:
         self.raw_velocity = 0.0
         
         # Model & Control Settings
-        self.active_model_name = "Default"
+        self.active_model_name = None
         self.available_models = []
         self.flip_lr = False
         self.speed_multiplier = 1.0
@@ -80,12 +81,14 @@ class SharedContext:
 
     def get_params(self):
         with self.lock:
-            return self.params.copy()
-        
+            return deepcopy(self.params)  # full copy including nested dicts
+
     def set_models(self, available_models):
         with self.lock:
             self.available_models = available_models
-            self.active_model_name = shared.available_models[0]
+            if not available_models:
+                raise RuntimeError("No models provided")
+            self.active_model_name = available_models[0]
     
     def set_model(self, active_model_name):
         with self.lock:
