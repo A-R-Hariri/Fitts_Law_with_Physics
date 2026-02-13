@@ -33,7 +33,7 @@ EPOCHS = 200; BATCH_SIZE = 4096; DROPOUT = 0.2; PATIENCE = 10
 LR_FACTOR = 0.8; LR_PATIENCE = 2; LR_INIT = 1e-3; LR_MIN = 1e-5
 
 COLLECT = 0
-NAME = 'test1'
+NAME = 'test2'
 FITTS_PATH = join('fitts_logs', NAME)
 DATA_PATH = join('emg_logs', NAME)
 

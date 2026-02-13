@@ -7,19 +7,20 @@ from utils import *
 
 # ======== MODEL 1: CNN ========
 class CNN(nn.Module):
-    def __init__(self, ch=CH, seq=SEQ, emb_dim=32, 
+    def __init__(self, ch=CH, seq=SEQ, emb_dim=64, 
                  num_classes=CLASSES, dropout=DROPOUT):
         super().__init__()
         self.emb_dim = emb_dim
         self.dropout = dropout
 
-        self.conv1 = nn.Conv1d(ch, 16, 8, padding="same")
-        self.conv2 = nn.Conv1d(16, 32, 4, padding="same")
+        self.conv1 = nn.Conv1d(ch, 32, 8, padding="same")
+        self.conv2 = nn.Conv1d(32, 64, 4, padding="same")
+        self.conv3 = nn.Conv1d(64, 128, 4, padding="same")
 
-        # self.adapool = nn.AdaptiveAvgPool1d(1)
+        self.pool = nn.AdaptiveAvgPool1d(1)
         
-        self.fc1 = nn.Linear(32 * seq, 64)
-        self.fc_emb = nn.Linear(64, emb_dim)
+        self.fc1 = nn.Linear(128, 128)
+        self.fc_emb = nn.Linear(128, emb_dim)
 
         self.drop = nn.Dropout(self.dropout)
 
@@ -41,12 +42,15 @@ class CNN(nn.Module):
         x = self.drop(x)
         x = F.relu(self.conv2(x))
         x = self.drop(x)
+        x = F.relu(self.conv3(x))
+        x = self.drop(x)
 
-        x = x.flatten(1)
+        x = self.pool(x).squeeze(-1)
+
         x = self.fc1(x)
         x = F.gelu(x)
-        x = self.drop(x)
         emb = self.fc_emb(x)
+
         logits = self.classifier(emb)
 
         if return_emb and return_logits:
