@@ -31,7 +31,12 @@ class MultiModelWrapper(nn.Module):
     def forward(self, x):
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x).to(self.device, non_blocking=True).float()
+
         name = shared.get_model()
+        if name is None:
+            name = list(self.models.keys())[0]
+            shared.set_model(name)
+
         if name != self.active_name:
             if name in self.models:
                 self.active_name = name
@@ -112,24 +117,24 @@ def input_thread(sock):
             pass
 
 
-# Names of .pt files in the 'pickles' folder
-model_names = [
-    'cnn_raw',
-    'cnn_relabeled',
-    'cnn_segmented',
-    'cnn_raw_eq',
-    'cnn_raw_rest'
-]
-
-loaded_models = load_all_models(model_names)
-available_keys = list(loaded_models.keys())
-
-shared.set_models(list(loaded_models.keys()))
-    
-wrapper = MultiModelWrapper(loaded_models).to(DEVICE)
-print(f"Models loaded into wrapper: {available_keys}")
-
 if __name__ == "__main__":
+    # Names of .pt files in the 'pickles' folder
+    model_names = [
+        'cnn_raw',
+        'cnn_relabeled',
+        'cnn_segmented',
+        'cnn_raw_eq',
+        'cnn_raw_rest'
+    ]
+
+    loaded_models = load_all_models(model_names)
+    available_keys = list(loaded_models.keys())
+
+    shared.set_models(list(loaded_models.keys()))
+        
+    wrapper = MultiModelWrapper(loaded_models).to(DEVICE)
+    print(f"Models loaded into wrapper: {available_keys}")
+
     p, smm = libemg.streamers.myo_streamer() 
     odh = libemg.data_handler.OnlineDataHandler(smm)
 
