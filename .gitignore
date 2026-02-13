@@ -1,0 +1,6 @@
+/__pycache__
+.Fitts.py
+/emg_logs/*
+/libemg
+/pickles/*
+/fitts_logs/*
