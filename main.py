@@ -105,7 +105,7 @@ if __name__ == "__main__":
     }
 
     model_names = ['cnn_raw', 'cnn_relabeled', 'cnn_segmented', 
-                   'cnn_raw_eq', 'cnn_relabeled_eq', 'cnn_segmented_eq',
+                #    'cnn_raw_eq', 'cnn_relabeled_eq', 'cnn_segmented_eq',
                    'cnn_raw_rest', 'cnn_relabeled_rest', 'cnn_segmented_rest']
     loaded_models = load_all_models(model_names)
     SharedContext.available_models = list(loaded_models.keys())
