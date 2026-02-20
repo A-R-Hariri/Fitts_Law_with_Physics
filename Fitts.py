@@ -303,7 +303,8 @@ class FittsTest(QWidget):
         x_in, y_in = self.sc.emg_x, self.sc.emg_y
         self.frame_count += 1
         self.target_timer += 1
-        desired_vx, desired_vy = x_in * params['velocity_scale'], y_in * params['velocity_scale']
+        speed_mult = self.sc.speed_multiplier * VEL_CONSTANT
+        desired_vx, desired_vy = x_in * speed_mult, y_in * speed_mult
         if params['physics']['enabled']:
             acc_x = (desired_vx - self.actual_velocity[0]) / params['physics']['mass']
             acc_y = (desired_vy - self.actual_velocity[1]) / params['physics']['mass']

@@ -64,13 +64,13 @@ def input_thread(sock, sc):
             data, _ = sock.recvfrom(1024)
             parts = data.decode("utf-8").strip().split(' ')
             if len(parts) >= 6:
-                probs_list = [float(p) for p in parts[:-1]]
-                raw_vel = float(parts[-2])
+                probs_list = [float(p) for p in parts[:-2]]
+                raw_vel = float(parts[-2])          # [-1] is timestamp
                 gesture = np.argmax(np.array(probs_list))
                 
                 flip = sc.flip_lr
-                speed_mult = sc.speed_multiplier * VEL_CONSTANT
-                speed = np.clip(raw_vel, 0.0, 1.0) * speed_mult
+                # speed_mult = sc.speed_multiplier * VEL_CONSTANT
+                speed = np.clip(raw_vel, 0.0, 1.0) #* speed_mult
 
                 dx, dy = 0.0, 0.0
                 if gesture == 1: dy = 1
@@ -93,22 +93,15 @@ if __name__ == "__main__":
     SharedContext.raw_velocity = 0.0
     SharedContext.flip_lr = False
     SharedContext.speed_multiplier = 1.0
-    SharedContext.active_model_name = 'cnn_raw'
     
-    SharedContext.params = {
-        'frame_rate': 60, 'mode': 'B', 'hold_frames_required': 180,
-        'target_timeout_frames': 900, 'max_targets': 16,
-        'target_radius_range': [30, 30], 'target_distance_range': [200, 400],
-        'ring_radius': 250, 'velocity_scale': 5.0, 'screen_size': (1200, 800),
-        'physics': {'enabled': False, 'mass': 5, 'max_acceleration': 0.08, 'damping': 1.0},
-        'c_vel': 1, 'use_test_input': False,
-    }
+    SharedContext.params = PARAMS
 
     model_names = ['cnn_raw', 'cnn_relabeled', 'cnn_segmented', 
                 #    'cnn_raw_eq', 'cnn_relabeled_eq', 'cnn_segmented_eq',
                    'cnn_raw_rest', 'cnn_relabeled_rest', 'cnn_segmented_rest']
     loaded_models = load_all_models(model_names)
     SharedContext.available_models = list(loaded_models.keys())
+    SharedContext.active_model_name = model_names[0]
     
     wrapper = MultiModelWrapper(loaded_models, SharedContext).to(DEVICE)
     o_classifier = libemg.emg_predictor.EMGClassifier(wrapper)
