@@ -4,3 +4,4 @@
 /libemg
 /pickles/*
 /fitts_logs/*
+*.csv
