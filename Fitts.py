@@ -17,7 +17,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush
 
 from utils import *
 
-VEL_CONSTANT = 5.0
+VEL_CONSTANT = 20.0
 
 # Placeholder for the proxy object initialized in main.py
 SharedContext = None
@@ -260,7 +260,7 @@ class FittsTest(QWidget):
             os.mkdir(fitts_folder)
         ts = datetime.now().strftime(r'%Y-%m-%d_%H-%M-%S')
         model_tag = str(self.sc.active_model_name).replace(" ", "_")
-        filename = f"{fitts_folder}/Fitts_{model_tag}_{ts}.csv"
+        filename = f"{fitts_folder}/Fitts_{ts}_{model_tag}.csv"
         self.log_file = open(filename, "w", newline="")
         self.logger = csv.writer(self.log_file)
         self.logger.writerow(["time", "frame", "mode", "model", "cursor_x", "cursor_y", "target_x", "target_y",
