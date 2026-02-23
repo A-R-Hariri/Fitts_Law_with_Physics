@@ -148,6 +148,11 @@ class Dashboard(QWidget):
         self.launch_btn.clicked.connect(self.launch_test)
         layout.addWidget(self.launch_btn)
 
+        self.stop_btn = QPushButton("Stop Test")
+        self.stop_btn.clicked.connect(self.stop_test)
+        layout.addWidget(self.stop_btn)
+        self.stop_btn.setEnabled(False)
+
         self.setLayout(layout)
         self.show()
 
@@ -199,9 +204,15 @@ class Dashboard(QWidget):
         if self.test_window is None or not self.test_window.isVisible():
             self.test_window = FittsTest(self.sc)
             self.test_window.dashboard = self
+            self.stop_btn.setEnabled(True)
         else:
             self.test_window.raise_()
             self.test_window.activateWindow()
+
+    def stop_test(self):
+        if self.test_window is not None or self.test_window.isVisible():
+            self.test_window.close()
+            self.stop_btn.setEnabled(False)
 
 class TestInputPanel(QWidget):
     def __init__(self, shared_context):
