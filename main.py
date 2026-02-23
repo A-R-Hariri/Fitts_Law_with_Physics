@@ -12,7 +12,7 @@ from multiprocessing import Manager
 
 from utils import * 
 from models import CNN
-from Fitts import Dashboard, QApplication, VEL_CONSTANT
+from Fitts import Dashboard, QApplication
 
 SEED = 13
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)

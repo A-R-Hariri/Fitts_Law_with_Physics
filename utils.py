@@ -33,7 +33,7 @@ EPOCHS = 200; BATCH_SIZE = 4096; DROPOUT = 0.2; PATIENCE = 10
 LR_FACTOR = 0.8; LR_PATIENCE = 2; LR_INIT = 1e-3; LR_MIN = 1e-5
 
 COLLECT = 0
-NAME = 'test_r_1'
+NAME = 'test2'
 FITTS_PATH = join('fitts_logs', NAME)
 DATA_PATH = join('emg_logs', NAME)
 
@@ -41,7 +41,7 @@ PARAMS = {
         'frame_rate': 60, 'mode': 'B', 'hold_frames_required': 90,
         'target_timeout_frames': 900, 'max_targets': 16,
         'target_radius_range': [20, 20], 'target_distance_range': [200, 400],
-        'ring_radius': 300, 'screen_size': (1200, 800),
+        'ring_radius': 300, 'screen_size': (1690, 980),
         'physics': {'enabled': False, 'mass': 5, 
                     'max_acceleration': 0.08, 'damping': 1.0},
         'c_vel': 1, 'use_test_input': False,
