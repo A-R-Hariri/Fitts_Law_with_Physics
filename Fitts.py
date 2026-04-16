@@ -19,6 +19,7 @@ from utils import *
 
 VEL_CONSTANT = 20.0
 
+
 # Placeholder for the proxy object initialized in main.py
 SharedContext = None
 
@@ -106,32 +107,15 @@ class Dashboard(QWidget):
         p_layout.addWidget(self.damping)
         layout.addLayout(p_layout)
 
-        self.radius_min = QSpinBox(); self.radius_max = QSpinBox()
-        self.radius_min.setRange(5, 300); self.radius_max.setRange(5, 300)
-        self.radius_min.setValue(params['target_radius_range'][0])
-        self.radius_max.setValue(params['target_radius_range'][1])
-        self.radius_min.valueChanged.connect(self.update_params)
-        self.radius_max.valueChanged.connect(self.update_params)
-        layout.addWidget(QLabel("Target Radius Range (px):"))
-        r_layout = QHBoxLayout(); r_layout.addWidget(self.radius_min); r_layout.addWidget(self.radius_max)
-        layout.addLayout(r_layout)
+        self.radius_list_input = QLineEdit(",".join(map(str, params.get('target_radius_list', [20]))))
+        self.radius_list_input.textChanged.connect(self.update_params)
+        layout.addWidget(QLabel("Target Radius List (px, comma separated):"))
+        layout.addWidget(self.radius_list_input)
 
-        self.dist_min = QSpinBox(); self.dist_max = QSpinBox()
-        self.dist_min.setRange(10, 1000); self.dist_max.setRange(10, 1000)
-        self.dist_min.setValue(params['target_distance_range'][0])
-        self.dist_max.setValue(params['target_distance_range'][1])
-        self.dist_min.valueChanged.connect(self.update_params)
-        self.dist_max.valueChanged.connect(self.update_params)
-        layout.addWidget(QLabel("Target Distance Range (Mode A):"))
-        d_layout = QHBoxLayout(); d_layout.addWidget(self.dist_min); d_layout.addWidget(self.dist_max)
-        layout.addLayout(d_layout)
-
-        self.ring_radius = QSpinBox()
-        self.ring_radius.setRange(50, 1000)
-        self.ring_radius.setValue(params['ring_radius'])
-        self.ring_radius.valueChanged.connect(self.update_params)
-        layout.addWidget(QLabel("Ring Radius (Mode B):"))
-        layout.addWidget(self.ring_radius)
+        self.ring_radius_list_input = QLineEdit(",".join(map(str, params.get('ring_radius_list', [300]))))
+        self.ring_radius_list_input.textChanged.connect(self.update_params)
+        layout.addWidget(QLabel("Ring Radius List (Mode B, comma separated):"))
+        layout.addWidget(self.ring_radius_list_input)
         
         self.c_vel = QDoubleSpinBox()
         self.c_vel.setValue(params['c_vel'])
@@ -139,10 +123,19 @@ class Dashboard(QWidget):
         layout.addWidget(QLabel("Mode C Velocity:"))
         layout.addWidget(self.c_vel)
 
-        self.test_input_checkbox = QCheckBox("Use Test Input Panel (X;Y)")
-        self.test_input_checkbox.setChecked(params['use_test_input'])
-        self.test_input_checkbox.toggled.connect(self.update_params)
-        layout.addWidget(self.test_input_checkbox)
+        # self.test_input_checkbox = QCheckBox("Use Test Input Panel (X;Y)")
+        # self.test_input_checkbox.setChecked(params['use_test_input'])
+        # self.test_input_checkbox.toggled.connect(self.update_params)
+        # layout.addWidget(self.test_input_checkbox)
+
+        self.snap_checkbox = QCheckBox("Snap back")
+        self.snap_checkbox.setChecked(params['snap_back'])
+        self.snap_checkbox.toggled.connect(self.update_params)
+        layout.addWidget(self.snap_checkbox)
+
+        self.test_checkbox = QCheckBox("Test Run")
+        self.test_checkbox.setChecked(True)
+        layout.addWidget(self.test_checkbox)
 
         self.launch_btn = QPushButton("Launch / Update Test")
         self.launch_btn.clicked.connect(self.launch_test)
@@ -181,15 +174,20 @@ class Dashboard(QWidget):
         p['physics']['mass'] = self.mass.value()
         p['physics']['damping'] = self.damping.value()
         p['physics']['enabled'] = self.physics_enabled.isChecked()
-        p['target_radius_range'] = [self.radius_min.value(), self.radius_max.value()]
-        if p['target_radius_range'][0] >= p['target_radius_range'][1]:
-            p['target_radius_range'][1] = p['target_radius_range'][0] + 1
-        p['target_distance_range'] = [self.dist_min.value(), self.dist_max.value()]
-        if p['target_distance_range'][0] >= p['target_distance_range'][1]:
-            p['target_distance_range'][1] = p['target_distance_range'][0] + 1
-        p['ring_radius'] = self.ring_radius.value()
+
+        try:
+            p['target_radius_list'] = [int(x.strip()) for x in self.radius_list_input.text().split(',') if x.strip().isdigit()]
+            if not p['target_radius_list']: p['target_radius_list'] = [200]
+        except: p['target_radius_list'] = [200]
+
+        try:
+            p['ring_radius_list'] = [int(x.strip()) for x in self.ring_radius_list_input.text().split(',') if x.strip().isdigit()]
+            if not p['ring_radius_list']: p['ring_radius_list'] = [300]
+        except: p['ring_radius_list'] = [300]
+
         p['c_vel'] = self.c_vel.value()
-        p['use_test_input'] = self.test_input_checkbox.isChecked()
+        # p['use_test_input'] = self.test_input_checkbox.isChecked()
+        p['snap_back'] = self.snap_checkbox.isChecked()
         self.sc.params = p
 
         if p['use_test_input']:
@@ -202,8 +200,7 @@ class Dashboard(QWidget):
     def launch_test(self):
         self.update_params()
         if self.test_window is None or not self.test_window.isVisible():
-            self.test_window = FittsTest(self.sc)
-            self.test_window.dashboard = self
+            self.test_window = FittsTest(self.sc, self)
             self.stop_btn.setEnabled(True)
         else:
             self.test_window.raise_()
@@ -213,40 +210,42 @@ class Dashboard(QWidget):
         if self.test_window is not None or self.test_window.isVisible():
             self.test_window.close()
             self.stop_btn.setEnabled(False)
+            self.test_window = None
 
-class TestInputPanel(QWidget):
-    def __init__(self, shared_context):
-        super().__init__()
-        self.sc = shared_context
-        self.setWindowTitle("Test Input Panel")
-        layout = QVBoxLayout()
-        self.x_input = QLineEdit("0.0")
-        self.y_input = QLineEdit("0.0")
-        layout.addWidget(QLabel("X Velocity (-1 to 1):"))
-        layout.addWidget(self.x_input)
-        layout.addWidget(QLabel("Y Velocity (-1 to 1):"))
-        layout.addWidget(self.y_input)
-        self.setLayout(layout)
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.write_inputs)
-        self.timer.start(50)
-        self.show()
+# class TestInputPanel(QWidget):
+#     def __init__(self, shared_context):
+#         super().__init__()
+#         self.sc = shared_context
+#         self.setWindowTitle("Test Input Panel")
+#         layout = QVBoxLayout()
+#         self.x_input = QLineEdit("0.0")
+#         self.y_input = QLineEdit("0.0")
+#         layout.addWidget(QLabel("X Velocity (-1 to 1):"))
+#         layout.addWidget(self.x_input)
+#         layout.addWidget(QLabel("Y Velocity (-1 to 1):"))
+#         layout.addWidget(self.y_input)
+#         self.setLayout(layout)
+#         self.timer = QTimer()
+#         self.timer.timeout.connect(self.write_inputs)
+#         self.timer.start(50)
+#         self.show()
 
-    def write_inputs(self):
-        try:
-            self.sc.emg_x = float(self.x_input.text())
-            self.sc.emg_y = float(self.y_input.text())
-        except:
-            pass
+#     def write_inputs(self):
+#         try:
+#             self.sc.emg_x = float(self.x_input.text())
+#             self.sc.emg_y = float(self.y_input.text())
+#         except:
+#             pass
     
-    def closeEvent(self, event):
-        self.timer.stop()
-        event.accept()
+#     def closeEvent(self, event):
+#         self.timer.stop()
+#         event.accept()
 
 class FittsTest(QWidget):
-    def __init__(self, shared_context):
+    def __init__(self, shared_context, dashboard):
         super().__init__()
         self.sc = shared_context
+        self.dashboard = dashboard
         self.setWindowTitle("Fitts' Law Test")
         params = self.sc.params
         self.setFixedSize(*params['screen_size'])
@@ -254,10 +253,12 @@ class FittsTest(QWidget):
         self.actual_velocity = [0.0, 0.0]
         self.hold_counter = 0
         self.targets_hit = 0
+        self.targets_hit_current_combo = 0
         self.target_timer = 0
-        self.ring_sequence = [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15] * 2
+        self.ring_sequence = [0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11]
         self.ring_index = 0
-        self.dashboard = None
+        self.combinations = [(r, t) for r in params.get('ring_radius_list', [300]) for t in params.get('target_radius_list', [20])]
+        self.current_combo_idx = 0
         self.init_logger()
         self.init_target()
         self.timer = QTimer()
@@ -271,7 +272,8 @@ class FittsTest(QWidget):
             os.mkdir(fitts_folder)
         ts = datetime.now().strftime(r'%Y-%m-%d_%H-%M-%S')
         model_tag = str(self.sc.active_model_name).replace(" ", "_")
-        filename = f"{fitts_folder}/Fitts_{ts}_{model_tag}.csv"
+        _test_run = 'Test_' if self.dashboard.test_checkbox.isChecked() else ''
+        filename = f"{fitts_folder}/{_test_run}Fitts_{ts}_{model_tag}.csv"
         self.log_file = open(filename, "w", newline="")
         self.logger = csv.writer(self.log_file)
         self.logger.writerow(["time", "frame", "mode", "model", "cursor_x", "cursor_y", "target_x", "target_y",
@@ -288,23 +290,24 @@ class FittsTest(QWidget):
             dist = random.randint(*params['target_distance_range'])
             angle = random.uniform(0, 2 * math.pi)
             cx, cy = self.cursor_pos
-            radius = random.randint(*params['target_radius_range'])
+            radius = random.choice(params['target_radius_list'])
             self.target_radius = radius
             self.target_pos = [max(radius, min(w - radius, int(cx + math.cos(angle) * dist))),
                               max(radius, min(h - radius, int(cy + math.sin(angle) * dist)))]
         elif mode == "B":
             self.points = []
             cx, cy = self.width() // 2, self.height() // 2
-            self.target_radius = random.randint(*params['target_radius_range'])
-            for i in range(16):
-                angle = 2 * math.pi * i / 16
-                self.points.append((int(cx + params['ring_radius'] * math.cos(angle)), 
-                                  int(cy + params['ring_radius'] * math.sin(angle))))
+            current_ring_radius, current_target_radius = self.combinations[self.current_combo_idx]
+            self.target_radius = current_target_radius
+            for i in range(12):
+                angle = 2 * math.pi * i / 12
+                self.points.append((int(cx + current_ring_radius * math.cos(angle)), 
+                                  int(cy + current_ring_radius * math.sin(angle))))
             self.target_index = self.ring_sequence[self.ring_index % len(self.ring_sequence)]
             self.ring_index += 1
             self.target_pos = list(self.points[self.target_index])
         elif mode == "C":
-            self.target_radius = random.randint(*params['target_radius_range'])
+            self.target_radius = random.choice(params['target_radius_list'])
             self.target_pos = [random.randint(self.target_radius, w - self.target_radius),
                               random.randint(self.target_radius, h - self.target_radius)]
             self.target_velocity = [random.choice([-1, 1]) * params['c_vel'], random.choice([-1, 1]) * params['c_vel']]
@@ -334,8 +337,22 @@ class FittsTest(QWidget):
         if params['mode'] in ["A", "B"]:
             if self.hold_counter >= params['hold_frames_required'] or self.target_timer >= params['target_timeout_frames']:
                 self.targets_hit += 1
-                if self.targets_hit >= params['max_targets']: self.close()
-                else: self.init_target()
+                self.targets_hit_current_combo += 1
+                if self.target_timer >= params['target_timeout_frames'] and params['snap_back']:
+                    self.cursor_pos[0] = self.target_pos[0]
+                    self.cursor_pos[1] = self.target_pos[1]
+                if params['mode'] == 'B':
+                    if self.targets_hit_current_combo >= params['max_targets']:
+                        self.current_combo_idx += 1
+                        self.targets_hit_current_combo = 0
+                        self.ring_index = 0
+                        if self.current_combo_idx >= len(self.combinations): self.close()
+                        else: self.init_target()
+                    else:
+                        self.init_target()
+                else:
+                    if self.targets_hit >= params['max_targets']: self.close()
+                    else: self.init_target()
         elif params['mode'] == "C":
             for i in range(2):
                 self.target_pos[i] += self.target_velocity[i]
