@@ -19,11 +19,11 @@ BATCH_SIZE=128
 
 
 if __name__ == "__main__":
-    if not os.path.exists(SGT_PATH) or not os.listdir(SGT_PATH):
+    if not os.path.exists(SGT_PATH) or not len(os.listdir(SGT_PATH)):
         p, smm = libemg.streamers.myo_streamer() 
         odh = libemg.data_handler.OnlineDataHandler(smm)
         
-        os.mkdir(SGT_PATH)
+        os.makedirs(SGT_PATH, exist_ok=True)
         args = {'num_reps': 15, 'rep_time': 3, 'rest_time': 2, 'media_folder': 'images/', 'data_folder': SGT_PATH}
         ui = libemg.gui.GUI(odh, args=args, width=700, height=700)
         ui.download_gestures([1,2,3,4,5], "images/")
