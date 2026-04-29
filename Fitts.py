@@ -116,6 +116,10 @@ class Dashboard(QWidget):
         self.ring_radius_list_input.textChanged.connect(self.update_params)
         layout.addWidget(QLabel("Ring Radius List (Mode B, comma separated):"))
         layout.addWidget(self.ring_radius_list_input)
+
+        self.label = QLineEdit("")
+        layout.addWidget(QLabel("Label for logging:"))
+        layout.addWidget(self.label)
         
         self.c_vel = QDoubleSpinBox()
         self.c_vel.setValue(params['c_vel'])
@@ -255,9 +259,10 @@ class FittsTest(QWidget):
         self.targets_hit = 0
         self.targets_hit_current_combo = 0
         self.target_timer = 0
-        self.ring_sequence = [0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11]
+        self.ring_sequence = [0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11,
+                               6, 0, 7, 1, 8, 2, 9, 3, 10, 4, 11, 5]
         self.ring_index = 0
-        self.combinations = [(r, t) for r in params.get('ring_radius_list', [300]) for t in params.get('target_radius_list', [20])]
+        self.combinations = [(r, t) for t in params.get('target_radius_list', [20]) for r in params.get('ring_radius_list', [300])]
         self.current_combo_idx = 0
         self.init_logger()
         self.init_target()
@@ -273,7 +278,9 @@ class FittsTest(QWidget):
         ts = datetime.now().strftime(r'%Y-%m-%d_%H-%M-%S')
         model_tag = str(self.sc.active_model_name).replace(" ", "_")
         _test_run = 'Test_' if self.dashboard.test_checkbox.isChecked() else ''
-        filename = f"{fitts_folder}/{_test_run}Fitts_{ts}_{model_tag}.csv"
+        filename = f"{fitts_folder}/{_test_run}Fitts_{ts}_{model_tag}"
+        filename += ("_" + self.dashboard.label.text()) if self.dashboard.label.text() else ""
+        filename += ".csv"
         self.log_file = open(filename, "w", newline="")
         self.logger = csv.writer(self.log_file)
         self.logger.writerow(["time", "frame", "mode", "model", "cursor_x", "cursor_y", "target_x", "target_y",
@@ -345,7 +352,7 @@ class FittsTest(QWidget):
                     if self.targets_hit_current_combo >= params['max_targets']:
                         self.current_combo_idx += 1
                         self.targets_hit_current_combo = 0
-                        self.ring_index = 0
+                        # self.ring_index = 0
                         if self.current_combo_idx >= len(self.combinations): self.close()
                         else: self.init_target()
                     else:
