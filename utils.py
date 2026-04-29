@@ -32,7 +32,7 @@ UPDATE_EVERY = 1; PRESIST_WORKER = True; PIN_MEMORY = True
 EPOCHS = 100; BATCH_SIZE = 512; DROPOUT = 0.2; PATIENCE = 5
 LR_FACTOR = 0.6; LR_PATIENCE = 4; LR_INIT = 1e-4; LR_MIN = 1e-5
 
-NAME = '3'
+NAME = 'Test'
 FITTS_PATH = join('fitts_logs', NAME)
 DATA_PATH = join('emg_logs', NAME)
 SGT_PATH = join('user_sgt', NAME)
@@ -48,7 +48,7 @@ PARAMS = {
         'ring_radius_list': [300,450], 'screen_size': (1690, 980),
         'physics': {'enabled': False, 'mass': 5, 
                     'max_acceleration': 0.08, 'damping': 1.0},
-        'c_vel': 1, 'use_test_input': False, 'snap_back' : True,
+        'c_vel': 1, 'use_test_input': False, 'snap_back' : False,
         }
 
 # ======== MODELS, TRAINING & DATASETS ========
