@@ -190,12 +190,12 @@ class Dashboard(QWidget):
         p['snap_back'] = self.snap_checkbox.isChecked()
         self.sc.params = p
 
-        if p['use_test_input']:
-            if self.test_input_panel is None:
-                self.test_input_panel = TestInputPanel(self.sc)
-            self.test_input_panel.show()
-        elif self.test_input_panel is not None:
-            self.test_input_panel.close()
+        # if p['use_test_input']:
+        #     if self.test_input_panel is None:
+        #         self.test_input_panel = TestInputPanel(self.sc)
+        #     self.test_input_panel.show()
+        # elif self.test_input_panel is not None:
+        #     self.test_input_panel.close()
 
     def launch_test(self):
         self.update_params()
