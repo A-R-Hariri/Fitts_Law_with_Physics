@@ -11,3 +11,4 @@ libemg
 /images
 /user_sgt
 *.pt
+checkpoints1/th_max_dic.npy
