@@ -36,7 +36,6 @@ Fitts_Law_with_Physics/
     Replay.py       -- Frame-accurate replay of saved session CSV logs
     models.py       -- Model architecture definitions (CNN, CNN_GRL, MLP)
     utils.py        -- Hyperparameters, data loaders, training/evaluation utilities
-    Analysis.ipynb  -- Session log analysis notebook
 ```
 
 ---
