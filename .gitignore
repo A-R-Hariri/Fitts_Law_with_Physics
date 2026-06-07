@@ -13,3 +13,15 @@ libemg
 *.pt
 checkpoints1/th_max_dic.npy
 /checkpoints1
+pilot*
+checkpoints*
+emg_logs
+pickles
+test*
+*.png
+/fitts_results*
+fitts_analysis*.py
+!fitts_analysis.py
+/Analysis
+fitts_logs*
+*.txt
