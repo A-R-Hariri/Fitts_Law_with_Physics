@@ -17,6 +17,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush
 
 from utils import *
 
+
 VEL_CONSTANT = 20.0
 
 
