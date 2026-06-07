@@ -293,6 +293,7 @@ class FittsTest(QWidget):
         mode = params['mode']
         w, h = self.width(), self.height()
         self.target_timer = 0
+        self.hold_counter = 0
         if mode == "A":
             dist = random.randint(*params['target_distance_range'])
             angle = random.uniform(0, 2 * math.pi)
@@ -320,6 +321,7 @@ class FittsTest(QWidget):
             self.target_velocity = [random.choice([-1, 1]) * params['c_vel'], random.choice([-1, 1]) * params['c_vel']]
 
     def update_frame(self):
+        _init = False
         params = self.sc.params
         x_in, y_in = self.sc.emg_x, self.sc.emg_y
         self.frame_count += 1
@@ -354,12 +356,12 @@ class FittsTest(QWidget):
                         self.targets_hit_current_combo = 0
                         # self.ring_index = 0
                         if self.current_combo_idx >= len(self.combinations): self.close()
-                        else: self.init_target()
+                        else: _init = True
                     else:
-                        self.init_target()
+                        _init = True
                 else:
                     if self.targets_hit >= params['max_targets']: self.close()
-                    else: self.init_target()
+                    else: _init = True
         elif params['mode'] == "C":
             for i in range(2):
                 self.target_pos[i] += self.target_velocity[i]
@@ -370,6 +372,7 @@ class FittsTest(QWidget):
                              *self.cursor_pos, *self.target_pos, self.target_radius, x_in, y_in,
                              *self.actual_velocity, acc_x, acc_y, int(inside), self.hold_counter,
                              self.sc.raw_velocity, *self.sc.probs])
+        if _init: self.init_target()
         self.update()
 
     def paintEvent(self, event):
