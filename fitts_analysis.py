@@ -16,6 +16,29 @@ effective-width method (Soukoreff and MacKenzie 2004; We = 4.133 * SDx).
 
 The unit of analysis is the subject. Higher mean with lower across-subject
 spread is treated as the target outcome.
+
+Notation per trial: D = straight-line distance from the start cursor position to
+the target center; W = target width (diameter); t_acq = time of acquisition;
+t_start = time the target appeared; t_end = time of the last logged frame;
+DWELL = required hold time; P = total cursor path length; d_eff = straight-line
+distance from the start cursor to the final cursor position (at acquisition or at
+timeout); ID = log2(D / W + 1).
+
+Metrics:
+- completion_rate: percent of targets acquired within the timeout. = 100 * n_success / n_trials. All trials.
+- movement_time (MT): time to acquire, excluding the dwell hold. = t_acq - t_start - DWELL. Success only.
+- movement_time_penalized: MT for successes (dwell removed); full elapsed time for failures. = (t_acq - t_start - DWELL) if success else (t_end - t_start). All trials.
+- throughput_nominal (TP): Shannon throughput, mean of per-trial ID/MT. = mean(ID / MT). Success only.
+- throughput_nominal_penalized: mean of ID / MT_penalized over all trials (failures charged their timeout). All trials.
+- throughput_meanofmeans: per-condition mean ID over mean MT, averaged across conditions. = mean_c( mean(ID)_c / mean(MT)_c ). Success only.
+- throughput_meanofmeans_penalized: same with MT_penalized over all trials. All trials.
+- throughput_effective: ISO effective throughput, mean_c( ID_e / mean(MT)_c ), ID_e = log2(D_e / W_e + 1), W_e = 4.133 * SD of along-axis endpoint deviation. Success only.
+- throughput_effective_penalized: same ID_e but divided by mean MT_penalized over all trials in the condition. All trials in denominator; W_e from successes.
+- path_efficiency (PE): directness of the trajectory, start to final position. = 100 * d_eff / P, capped at 100. All trials.
+- direction_change_ratio: cardinal movement segments taken divided by the minimum needed. = N_seg / N_seg_min, N_seg_min = 1 if the target is on a cardinal axis from the start else 2. Optimal = 1.0. All trials.
+- overshoots: count of target-boundary exits after first entry (enter-then-leave episodes). Success only.
+- stopping_distance: maximum penetration past the target boundary after first entry, in px. Success only.
+- reaction_time: time from target onset to first cursor movement above a step threshold. Success only.
 """
 
 import os
@@ -60,17 +83,23 @@ TARGET_RADII = [20, 10]
 # (the cursor always starts at screen center). Fallback is SCREEN_SIZE / 2.
 SCREEN_CENTER = None
 
-# Drop the first trial of each condition (the centering or cross-condition
-# transition move), per standard ISO multidirectional practice. Per-trial
-# nominal throughput uses the actual logged amplitude either way.
-DROP_FIRST_PER_CONDITION = True
+# The cursor is initialized at screen center, so the very first target of the
+# session is a half-amplitude centering move, not a ring-to-ring trial. Drop only
+# that one (ISO convention), leaving 4 conditions x 8 - 1 = 31 scored trials. The
+# per-condition transition targets (trials 8, 16, 24) start at the previous
+# condition's last target and are full movements, so they are kept.
+DROP_FIRST_MOVE = True
+DROP_FIRST_PER_CONDITION = False
 
-# Quality metrics (throughput, MT, PE, RT, overshoot, stopping distance) are
-# computed over successfully acquired trials only. Completion rate uses all
-# (non-dropped) trials.
+# Quality metrics that require reaching the target (overshoot, stopping
+# distance, reaction time) and the success-only throughput / MT use acquired
+# trials. Completion, the penalized metrics, path efficiency, and the
+# direction-change ratio use all trials.
 MOVE_STEP_PX = 1.0          # cursor step magnitude that counts as movement onset
 DWELL_TIME = HOLD_FRAMES / FRAME_RATE
 MIN_TRIALS_FOR_WE = 3       # minimum successful trials per condition for We
+DIR_MIN_STEP_PX = 2.0       # per-frame step below this is ignored for direction
+DIR_MERGE_PX = 15.0         # a cardinal segment shorter than this is treated as jitter and merged
 
 # Direction of improvement, used only for sorting and reporting.
 HIGHER_IS_BETTER = {
@@ -83,11 +112,11 @@ HIGHER_IS_BETTER = {
     "reaction_time": False,
     "overshoots": False,
     "stopping_distance": False,
+    "direction_change_ratio": False,
     # Penalized variants (failed trials folded in).
     "throughput_nominal_penalized": True,
     "throughput_meanofmeans_penalized": True,
     "throughput_effective_penalized": True,
-    "path_efficiency_penalized": True,
     "movement_time_penalized": False,
 }
 
@@ -96,8 +125,6 @@ HIGHER_IS_BETTER = {
 PLOT_METRICS = [
     "throughput_nominal",
     "throughput_nominal_penalized",
-    "path_efficiency",
-    "path_efficiency_penalized",
     "movement_time",
     "movement_time_penalized",
     "throughput_effective",
@@ -105,6 +132,8 @@ PLOT_METRICS = [
     "throughput_meanofmeans",
     "throughput_meanofmeans_penalized",
     "completion_rate",
+    "path_efficiency",
+    "direction_change_ratio",
     "overshoots",
     "stopping_distance",
     "reaction_time",
@@ -170,15 +199,60 @@ def _infer_center(df):
     return float(df["cursor_x"].iloc[0]), float(df["cursor_y"].iloc[0])
 
 
+def _cardinal_segments(cx, cy, min_step=DIR_MIN_STEP_PX, merge_px=DIR_MERGE_PX):
+    """
+    Number of cardinal (Manhattan) movement segments in a cursor trajectory.
+
+    The control maps gestures to up/down/left/right, so each instant of motion is
+    quantized to the dominant cardinal axis and sign. Consecutive frames in the
+    same cardinal direction form one segment; a new segment starts on every
+    direction change. Per-frame steps below min_step are ignored (no motion), and
+    a segment whose total displacement is below merge_px is treated as jitter and
+    removed before counting. Returns the segment count (0 if the cursor never
+    moved). The user-facing "direction change" count equals this segment count.
+    """
+    cx = np.asarray(cx, dtype=float)
+    cy = np.asarray(cy, dtype=float)
+    if cx.size < 2:
+        return 0
+    dx = np.diff(cx)
+    dy = np.diff(cy)
+    runs = []  # [label, accumulated_displacement]
+    for sx, sy in zip(dx, dy):
+        mag = math.hypot(sx, sy)
+        if mag < min_step:
+            continue
+        if abs(sx) >= abs(sy):
+            lab = 0 if sx > 0 else 1
+        else:
+            lab = 2 if sy > 0 else 3
+        if runs and runs[-1][0] == lab:
+            runs[-1][1] += mag
+        else:
+            runs.append([lab, mag])
+    if not runs:
+        return 0
+    kept = [r for r in runs if r[1] >= merge_px] or runs
+    merged = []
+    for lab, d in kept:
+        if merged and merged[-1][0] == lab:
+            merged[-1][1] += d
+        else:
+            merged.append([lab, d])
+    return len(merged)
+
+
 def segment_trials(df, subject, model):
     """
     Split one session into trials and compute per-trial metrics.
 
-    A trial is a maximal run of rows sharing the same (target_x, target_y).
-    Acquisition (hold_count reaching HOLD_FRAMES) is logged on the FIRST row of
-    the NEXT trial because of the known off-by-one in the runner; the acquired
-    target therefore lives on the current trial's rows and the selection point
-    is the current trial's last logged cursor position.
+    A trial is a maximal run of rows sharing the same (target_x, target_y). The
+    dwell counter increments while the cursor holds inside the target; the runner
+    logs the firing frame as hold_count == HOLD_FRAMES on the post-switch artifact
+    row (target already advanced), so a genuine acquisition appears as
+    hold_count == HOLD_FRAMES - 1 on this trial's own rows. Acquisition is flagged
+    exactly on that value; any hold_count >= HOLD_FRAMES is the carried artifact
+    and is treated as 0. No look-ahead to the next block is used.
     """
     cx, cy = _infer_center(df)
 
@@ -205,9 +279,10 @@ def segment_trials(df, subject, model):
         width = 2.0 * radius
 
         start = (float(blk["cursor_x"].iloc[0]), float(blk["cursor_y"].iloc[0]))
-        end = (float(blk["cursor_x"].iloc[-1]), float(blk["cursor_y"].iloc[-1]))
 
-        amplitude = math.hypot(start[0] - t_x, start[1] - t_y)
+        # Task distance: start cursor to target center (drives ID). Not called
+        # amplitude here to keep the ID input unambiguous.
+        distance = math.hypot(start[0] - t_x, start[1] - t_y)
         ring_raw = math.hypot(t_x - cx, t_y - cy)
         ring = min(RING_RADII, key=lambda r: abs(r - ring_raw)) if RING_RADII else round(ring_raw)
         condition = "ring%d_w%d" % (int(ring), int(width))
@@ -219,51 +294,59 @@ def segment_trials(df, subject, model):
             is_first_in_cond = False
         prev_cond = condition
 
-        # Outcome. Acquisition (hold_count reaching HOLD_FRAMES) is logged on the
-        # NEXT block's first row because of the runner off-by-one, so a real
-        # acquisition is read from the next block, not from this block's rows. A
-        # leading hold_count == HOLD_FRAMES on this block's own first row is the
-        # PREVIOUS target's acquisition artifact: the target has already switched,
-        # the cursor is still on the old target, and inside == 0. Genuine dwell
-        # therefore only accumulates while inside == 1, so it is gated on that to
-        # keep the artifact from inflating the in-block hold maximum. In Mode B
-        # (ISO ring) consecutive targets are far apart, so the artifact row is
-        # always inside == 0.
-        inside_arr = blk["inside"].to_numpy().astype(int)
-        hold_arr = blk["hold_count"].to_numpy()
-        genuine_hold = hold_arr[inside_arr == 1]
-        genuine_max_hold = float(genuine_hold.max()) if genuine_hold.size else 0.0
-        if bi + 1 < len(blocks):
-            nxt = blocks[bi + 1].reset_index(drop=True)
-            next_first_hold = float(nxt["hold_count"].iloc[0])
-            acquired = next_first_hold >= HOLD_FRAMES
-            t_acq = float(nxt["time"].iloc[0])
-        else:
-            # Final trial of the file: the acquisition row is not written
-            # because the session closes. Accept a near-complete genuine dwell.
-            acquired = genuine_max_hold >= (HOLD_FRAMES - 1)
-            t_acq = float(blk["time"].iloc[-1]) + 1.0 / FRAME_RATE
+        # Outcome via the dwell counter only. A genuine dwell completion is
+        # hold_count == HOLD_FRAMES - 1 (the firing frame at HOLD_FRAMES is logged
+        # on the next block as the post-switch artifact). Treat any hold_count
+        # >= HOLD_FRAMES as 0, then flag acquired exactly on HOLD_FRAMES - 1.
+        hold_arr = blk["hold_count"].to_numpy().astype(float)
+        hold_adj = np.where(hold_arr >= HOLD_FRAMES, 0.0, hold_arr)
+        acq_rows = np.where(hold_adj == (HOLD_FRAMES - 1))[0]
+        success = acq_rows.size > 0
+        acq_i = int(acq_rows[-1]) if success else (n - 1)
+        end_i = acq_i
 
-        timed_out = (not acquired) and (n >= TIMEOUT_FRAMES * 0.9)
-        success = bool(acquired)
+        # Selection point: cursor where the dwell completed (success) or where it
+        # sat at timeout (failure).
+        end = (float(blk["cursor_x"].iloc[end_i]), float(blk["cursor_y"].iloc[end_i]))
+
+        timed_out = (not success) and (n >= TIMEOUT_FRAMES * 0.9)
 
         t_start = float(blk["time"].iloc[0])
         t_end = float(blk["time"].iloc[-1])
-        mt = (t_acq - t_start) if success else np.nan
-        # Penalized movement time. Successful trials keep their acquisition time;
-        # failed (timed-out) trials are charged the full time spent on the target
-        # (its elapsed duration, which is approximately the timeout window). This
-        # makes any metric built on mt_penalized unconditional: it folds the cost
-        # of failure into the metric instead of dropping failed trials.
+        # Acquisition time is one frame past the last dwell frame (when the hold
+        # would tick to HOLD_FRAMES and fire). Movement time removes the mandatory
+        # dwell on every acquired target; failures never dwell, so their penalized
+        # time is the full elapsed duration with nothing subtracted.
+        t_acq = (float(blk["time"].iloc[acq_i]) + 1.0 / FRAME_RATE) if success else np.nan
+        mt = (t_acq - t_start - DWELL_TIME) if success else np.nan
+        if success and not np.isnan(mt):
+            mt = max(mt, 1.0 / FRAME_RATE)
         mt_penalized = mt if success else max(t_end - t_start, 1.0 / FRAME_RATE)
 
-        # Path length over the block.
-        dx = np.diff(blk["cursor_x"].to_numpy())
-        dy = np.diff(blk["cursor_y"].to_numpy())
+        # Path from the start to the selection point (acquisition or timeout).
+        seg_x = blk["cursor_x"].to_numpy()[:end_i + 1]
+        seg_y = blk["cursor_y"].to_numpy()[:end_i + 1]
+        dx = np.diff(seg_x)
+        dy = np.diff(seg_y)
         path_len = float(np.hypot(dx, dy).sum())
-        pe = (amplitude / path_len) if path_len > 1e-9 else np.nan
+        # Path efficiency: directness from the start cursor to the final cursor
+        # position, over the whole path. One definition for success and failure.
+        # 100 percent is a perfectly straight path.
+        eff_disp = math.hypot(end[0] - start[0], end[1] - start[1])
+        pe = (eff_disp / path_len) if path_len > 1e-9 else np.nan
         if pe is not None and not np.isnan(pe):
             pe = min(pe, 1.0)
+
+        # Direction-change ratio over the same start->selection path: cardinal
+        # movement segments taken versus the minimum needed. Under cardinal
+        # control a target off both axes needs at least two segments (one per
+        # axis); a target aligned with an axis (smaller offset within one target
+        # radius) needs one. Computed for every trial, hit or miss.
+        n_seg = _cardinal_segments(seg_x, seg_y)
+        off_x = abs(t_x - start[0])
+        off_y = abs(t_y - start[1])
+        min_seg = 1 if min(off_x, off_y) <= radius else 2
+        dir_ratio = (n_seg / min_seg) if n_seg > 0 else np.nan
 
         # Overshoot count: number of inside 1 -> 0 transitions within the block
         # (each is an enter-then-leave before final acquisition).
@@ -291,8 +374,7 @@ def segment_trials(df, subject, model):
         else:
             rt = np.nan
 
-        id_nominal = math.log2(amplitude / width + 1.0) if width > 0 and amplitude > 0 else np.nan
-        endpoint_dev = None  # filled later, needs task axis (handled in effective TP)
+        id_nominal = math.log2(distance / width + 1.0) if width > 0 and distance > 0 else np.nan
 
         rows.append({
             "subject": subject,
@@ -304,7 +386,7 @@ def segment_trials(df, subject, model):
             "width": width,
             "is_first_in_condition": is_first_in_cond,
             "n_frames": n,
-            "amplitude": amplitude,
+            "distance": distance,
             "id_nominal": id_nominal,
             "start_x": start[0], "start_y": start[1],
             "target_x": t_x, "target_y": t_y,
@@ -312,18 +394,23 @@ def segment_trials(df, subject, model):
             "success": int(success),
             "timed_out": int(timed_out),
             "movement_time": mt,
-            "movement_time_no_dwell": (mt - DWELL_TIME) if (success and not np.isnan(mt)) else np.nan,
             "mt_penalized": mt_penalized,
             "path_length": path_len,
             "path_efficiency": (pe * 100.0) if pe is not None and not np.isnan(pe) else np.nan,
+            "n_movement_segments": n_seg,
+            "min_movement_segments": min_seg,
+            "direction_change_ratio": dir_ratio,
             "overshoots": overshoots,
             "stopping_distance": stop_dist,
             "reaction_time": rt,
         })
 
     trials = pd.DataFrame(rows)
-    if DROP_FIRST_PER_CONDITION and len(trials):
-        trials = trials[~trials["is_first_in_condition"]].reset_index(drop=True)
+    if len(trials):
+        if DROP_FIRST_MOVE:
+            trials = trials[trials["trial_global"] != trials["trial_global"].min()].reset_index(drop=True)
+        elif DROP_FIRST_PER_CONDITION:
+            trials = trials[~trials["is_first_in_condition"]].reset_index(drop=True)
     return trials
 
 
@@ -368,7 +455,7 @@ def effective_throughput_per_subject_model(trials):
             if sdx < 1e-6:
                 continue
             we = 4.133 * sdx
-            ae = float(gc["amplitude"].mean())
+            ae = float(gc["distance"].mean())
             ide = math.log2(ae / we + 1.0) if we > 0 and ae > 0 else np.nan
             if np.isnan(ide):
                 continue
@@ -409,22 +496,20 @@ def aggregate_per_subject_model(trials):
     agg = (ok.groupby(["subject", "model"])
              .agg(throughput_nominal=("tp_trial", "mean"),
                   movement_time=("movement_time", "mean"),
-                  movement_time_no_dwell=("movement_time_no_dwell", "mean"),
-                  path_efficiency=("path_efficiency", "mean"),
                   reaction_time=("reaction_time", "mean"),
                   overshoots=("overshoots", "mean"),
                   stopping_distance=("stopping_distance", "mean"),
                   n_success=("success", "size"))
              .reset_index())
 
-    # Completion rate over all (non-dropped) trials.
+    # Completion rate over all trials.
     comp = (trials.groupby(["subject", "model"])
                   .agg(n_trials=("success", "size"),
                        completion_rate=("success", "mean"))
                   .reset_index())
     comp["completion_rate"] = comp["completion_rate"] * 100.0
 
-    # ======== penalized metrics (all trials, failed folded in) ========
+    # ======== all-trial metrics (failures folded in) ========
     allt = trials.copy()
     allt["tp_pen_trial"] = allt["id_nominal"] / allt["mt_penalized"]
 
@@ -437,10 +522,13 @@ def aggregate_per_subject_model(trials):
                        .agg(throughput_meanofmeans_penalized=("tp_cond_pen", "mean"))
                        .reset_index())
 
+    # Path efficiency and the direction-change ratio are single definitions over
+    # all trials (success and failure share the same formula).
     agg_pen = (allt.groupby(["subject", "model"])
                    .agg(throughput_nominal_penalized=("tp_pen_trial", "mean"),
                         movement_time_penalized=("mt_penalized", "mean"),
-                        path_efficiency_penalized=("path_efficiency", "mean"))
+                        path_efficiency=("path_efficiency", "mean"),
+                        direction_change_ratio=("direction_change_ratio", "mean"))
                    .reset_index())
 
     eff = effective_throughput_per_subject_model(trials)
@@ -451,6 +539,77 @@ def aggregate_per_subject_model(trials):
               .merge(mom_pen, on=["subject", "model"], how="left")
               .merge(eff, on=["subject", "model"], how="left"))
     return psm, cond
+
+
+# ======== PER-CONDITION (PER-ID) AGGREGATION ========
+
+def _effective_tp_for_condition(ok_cond, all_cond):
+    """Effective throughput for a single condition. We and the effective ID come
+    from the successful endpoints in that condition; returns (success-only,
+    penalized) where the penalized variant divides the same effective ID by the
+    mean penalized MT over all trials in the condition. NaN if too few successes
+    or degenerate endpoint scatter (effective width is undefined there)."""
+    if len(ok_cond) < MIN_TRIALS_FOR_WE:
+        return np.nan, np.nan
+    axis_dx = ok_cond["target_x"].to_numpy() - ok_cond["start_x"].to_numpy()
+    axis_dy = ok_cond["target_y"].to_numpy() - ok_cond["start_y"].to_numpy()
+    norm = np.hypot(axis_dx, axis_dy)
+    norm[norm < 1e-9] = 1e-9
+    ux, uy = axis_dx / norm, axis_dy / norm
+    ex = ok_cond["end_x"].to_numpy() - ok_cond["target_x"].to_numpy()
+    ey = ok_cond["end_y"].to_numpy() - ok_cond["target_y"].to_numpy()
+    proj = ex * ux + ey * uy
+    sdx = float(np.std(proj, ddof=1))
+    if sdx < 1e-6:
+        return np.nan, np.nan
+    we = 4.133 * sdx
+    ae = float(ok_cond["distance"].mean())
+    ide = math.log2(ae / we + 1.0) if we > 0 and ae > 0 else np.nan
+    if np.isnan(ide):
+        return np.nan, np.nan
+    mt = float(ok_cond["movement_time"].mean())
+    mtp = float(all_cond["mt_penalized"].mean())
+    eff = (ide / mt) if mt > 1e-9 else np.nan
+    effp = (ide / mtp) if mtp > 1e-9 else np.nan
+    return eff, effp
+
+
+def aggregate_per_subject_model_condition(trials):
+    """One row per (subject, model, condition). Each condition is a single
+    nominal ID level, so this is the per-ID breakdown. Success-only metrics use
+    the successful trials in the condition; penalized and completion use all
+    trials in the condition. Same definitions as the global aggregation."""
+    rows = []
+    for (subj, model, condition), g in trials.groupby(["subject", "model", "condition"]):
+        ok = g[g["success"] == 1]
+        n_trials = len(g)
+        n_success = len(ok)
+        id_cond = float(g["id_nominal"].mean())
+        mt_succ = float(ok["movement_time"].mean()) if n_success else np.nan
+        mtp_all = float(g["mt_penalized"].mean())
+        eff, effp = _effective_tp_for_condition(ok, g)
+        rows.append({
+            "subject": subj, "model": model, "condition": condition,
+            "id_nominal": id_cond,
+            "ring_radius": int(g["ring_radius"].iloc[0]),
+            "width": float(g["width"].iloc[0]),
+            "n_trials": n_trials, "n_success": n_success,
+            "completion_rate": 100.0 * n_success / n_trials if n_trials else np.nan,
+            "throughput_nominal": float((ok["id_nominal"] / ok["movement_time"]).mean()) if n_success else np.nan,
+            "throughput_nominal_penalized": float((g["id_nominal"] / g["mt_penalized"]).mean()),
+            "throughput_meanofmeans": (id_cond / mt_succ) if (mt_succ and not np.isnan(mt_succ)) else np.nan,
+            "throughput_meanofmeans_penalized": (id_cond / mtp_all) if mtp_all > 1e-9 else np.nan,
+            "throughput_effective": eff,
+            "throughput_effective_penalized": effp,
+            "movement_time": mt_succ,
+            "movement_time_penalized": mtp_all,
+            "path_efficiency": float(g["path_efficiency"].mean()),
+            "direction_change_ratio": float(g["direction_change_ratio"].mean()),
+            "overshoots": float(ok["overshoots"].mean()) if n_success else np.nan,
+            "stopping_distance": float(ok["stopping_distance"].mean()) if n_success else np.nan,
+            "reaction_time": float(ok["reaction_time"].mean()) if n_success else np.nan,
+        })
+    return pd.DataFrame(rows)
 
 
 # ======== FITTS REGRESSION (VALIDITY CHECK) ========
@@ -619,16 +778,16 @@ def _fmt_stat(v):
     return ("%.1f" % v) if abs(v) >= 10 else ("%.2f" % v)
 
 
-def plot_metric_box(psm, metric, ax):
+def plot_metric_box(psm, metric, ax, color_map=None):
     data = psm[["model", metric]].dropna()
     if data.empty:
         ax.set_visible(False)
         return
     order = _order_models(psm, metric)
-    all_models = sorted(psm["model"].unique())
-    colors = plt.cm.tab10.colors
-    color_map = dict(zip(all_models, colors))
-    colors = [color_map[model] for model in order]
+    if color_map is None:
+        all_models = sorted(psm["model"].unique())
+        color_map = dict(zip(all_models, plt.cm.tab10.colors))
+    colors = [color_map.get(model, "gray") for model in order]
     if _HAS_SNS:
         sns.boxplot(data=data, x="model", y=metric, order=order, ax=ax,
                     showfliers=False, width=0.6,
@@ -695,8 +854,57 @@ def plot_individual_boxes(psm, metrics, out_dir):
         plot_metric_box(psm, met, ax)
         ax.set_ylabel(met)
         fig.tight_layout()
-        fig.savefig(join(out_dir, "box_%s.png" % met), bbox_inches="tight")
+        fig.savefig(join(out_dir, "%s.png" % met), bbox_inches="tight")
         plt.close(fig)
+
+
+def _model_color_map(models):
+    # Same mapping used by plot_metric_box's default: sorted model name -> tab10
+    # color, so a model keeps one color across every plot and every ID panel.
+    ms = sorted(models)
+    cols = plt.cm.tab10.colors
+    return {m: cols[i % len(cols)] for i, m in enumerate(ms)}
+
+
+def plot_metric_by_id_box(psmc, metric, path, color_map=None):
+    # One figure per metric, one boxplot subplot per ID level (same box style as
+    # the headline plots). Each panel shows the across-subject distribution per
+    # model at that single ID. A fixed color map keeps a model's color identical
+    # across panels even when a sparse metric drops a model in some panel.
+    if metric not in psmc.columns or not psmc[metric].notna().any():
+        return
+    if color_map is None:
+        color_map = _model_color_map(psmc["model"].unique())
+    canon = psmc.groupby("condition")["id_nominal"].mean().sort_values()
+    conds = list(canon.index)
+    n = len(conds)
+    ncol = 2 if n <= 4 else 3
+    nrow = int(math.ceil(n / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 4.6 * nrow), dpi=300,
+                             squeeze=False)
+    axes = axes.flatten()
+    direction = "higher better" if HIGHER_IS_BETTER.get(metric, True) else "lower better"
+    for i, c in enumerate(conds):
+        sub = psmc[psmc["condition"] == c][["model", metric]].dropna()
+        plot_metric_box(sub, metric, axes[i], color_map=color_map)
+        axes[i].set_title("ID=%.2f  (%s)" % (float(canon[c]), c), fontsize=9)
+        axes[i].set_ylabel(metric, fontsize=8)
+    for j in range(n, len(axes)):
+        axes[j].set_visible(False)
+    fig.suptitle("%s by ID (%s) -- each point is one subject" % (metric, direction),
+                 fontsize=13, y=1.005)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_all_by_id(psmc, metrics, out_dir, color_map=None):
+    if color_map is None:
+        color_map = _model_color_map(psmc["model"].unique())
+    for met in metrics:
+        if met not in psmc.columns or not psmc[met].notna().any():
+            continue
+        plot_metric_by_id_box(psmc, met, join(out_dir, "%s_by_id.png" % met), color_map)
 
 
 def plot_regression(cond, reg, path):
@@ -765,6 +973,9 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
     psm.to_csv(join(out_dir, "per_subject_model.csv"), index=False)
     cond.to_csv(join(out_dir, "per_subject_model_condition.csv"), index=False)
 
+    psmc = aggregate_per_subject_model_condition(trials)
+    psmc.to_csv(join(out_dir, "per_subject_model_condition_metrics.csv"), index=False)
+
     reg = fitts_regression(cond)
     reg.to_csv(join(out_dir, "fitts_regression.csv"), index=False)
 
@@ -784,8 +995,12 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
         pd.concat(all_pairs, ignore_index=True).to_csv(
             join(out_dir, "pairwise_wilcoxon.csv"), index=False)
 
-    plot_boxgrid(psm, metrics_present, join(out_dir, "boxplots_grid.png"))
+    plot_boxgrid(psm, metrics_present, join(out_dir, "metrics_grid.png"))
     plot_individual_boxes(psm, metrics_present, out_dir)
+
+    byid_metrics = [m for m in PLOT_METRICS if m in psmc.columns and psmc[m].notna().any()]
+    cmap = _model_color_map(psm["model"].unique())
+    plot_all_by_id(psmc, byid_metrics, out_dir, cmap)
     if len(cond):
         plot_regression(cond, reg, join(out_dir, "fitts_regression.png"))
 
@@ -794,7 +1009,7 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
     print("Subjects: %d   Models: %d   Trials: %d" % (n_subj, n_models, len(trials)))
     print("Outputs written to: %s" % out_dir)
     return {"trials": trials, "per_subject_model": psm, "condition": cond,
-            "regression": reg, "summary": summ}
+            "condition_metrics": psmc, "regression": reg, "summary": summ}
 
 
 if __name__ == "__main__":
