@@ -83,18 +83,31 @@ HIGHER_IS_BETTER = {
     "reaction_time": False,
     "overshoots": False,
     "stopping_distance": False,
+    # Penalized variants (failed trials folded in).
+    "throughput_nominal_penalized": True,
+    "throughput_meanofmeans_penalized": True,
+    "throughput_effective_penalized": True,
+    "path_efficiency_penalized": True,
+    "movement_time_penalized": False,
 }
 
-# Metrics shown in the headline boxplot grid.
+# Metrics shown in the headline boxplot grid. Each penalized metric is placed
+# next to its success-only counterpart.
 PLOT_METRICS = [
     "throughput_nominal",
+    "throughput_nominal_penalized",
     "path_efficiency",
+    "path_efficiency_penalized",
+    "movement_time",
+    "movement_time_penalized",
+    "throughput_effective",
+    "throughput_effective_penalized",
+    "throughput_meanofmeans",
+    "throughput_meanofmeans_penalized",
     "completion_rate",
     "overshoots",
-    "movement_time",
     "stopping_distance",
     "reaction_time",
-    "throughput_effective",
 ]
 
 
@@ -235,7 +248,14 @@ def segment_trials(df, subject, model):
         success = bool(acquired)
 
         t_start = float(blk["time"].iloc[0])
+        t_end = float(blk["time"].iloc[-1])
         mt = (t_acq - t_start) if success else np.nan
+        # Penalized movement time. Successful trials keep their acquisition time;
+        # failed (timed-out) trials are charged the full time spent on the target
+        # (its elapsed duration, which is approximately the timeout window). This
+        # makes any metric built on mt_penalized unconditional: it folds the cost
+        # of failure into the metric instead of dropping failed trials.
+        mt_penalized = mt if success else max(t_end - t_start, 1.0 / FRAME_RATE)
 
         # Path length over the block.
         dx = np.diff(blk["cursor_x"].to_numpy())
@@ -293,6 +313,7 @@ def segment_trials(df, subject, model):
             "timed_out": int(timed_out),
             "movement_time": mt,
             "movement_time_no_dwell": (mt - DWELL_TIME) if (success and not np.isnan(mt)) else np.nan,
+            "mt_penalized": mt_penalized,
             "path_length": path_len,
             "path_efficiency": (pe * 100.0) if pe is not None and not np.isnan(pe) else np.nan,
             "overshoots": overshoots,
@@ -317,11 +338,20 @@ def effective_throughput_per_subject_model(trials):
     Note: dwell-based selection constrains endpoints to lie inside the target,
     which compresses SDx and inflates effective throughput in absolute terms.
     It remains valid for relative comparison across models under the same dwell.
+
+    Also returns a penalized variant. We and the effective index of difficulty
+    are still derived from successful endpoints (failed trials have no selection
+    endpoint), but the movement-time denominator is taken over all trials in the
+    condition (failed trials at their penalized time), so the metric is dragged
+    down for models that fail often. A subject-model with no usable successful
+    condition gets NaN for both, since effective width is undefined there.
     """
     out = []
     ok = trials[trials["success"] == 1].copy()
     for (subj, model), g in ok.groupby(["subject", "model"]):
+        gall = trials[(trials["subject"] == subj) & (trials["model"] == model)]
         tp_conds = []
+        tp_conds_pen = []
         for cond, gc in g.groupby("condition"):
             if len(gc) < MIN_TRIALS_FOR_WE:
                 continue
@@ -340,13 +370,21 @@ def effective_throughput_per_subject_model(trials):
             we = 4.133 * sdx
             ae = float(gc["amplitude"].mean())
             ide = math.log2(ae / we + 1.0) if we > 0 and ae > 0 else np.nan
+            if np.isnan(ide):
+                continue
             mt = float(gc["movement_time"].mean())
-            if mt > 1e-9 and not np.isnan(ide):
+            if mt > 1e-9:
                 tp_conds.append(ide / mt)
+            # Penalized: same effective ID, MT over all trials in this condition.
+            gc_all = gall[gall["condition"] == cond]
+            mt_pen = float(gc_all["mt_penalized"].mean())
+            if mt_pen > 1e-9:
+                tp_conds_pen.append(ide / mt_pen)
         out.append({
             "subject": subj,
             "model": model,
             "throughput_effective": float(np.mean(tp_conds)) if tp_conds else np.nan,
+            "throughput_effective_penalized": float(np.mean(tp_conds_pen)) if tp_conds_pen else np.nan,
         })
     return pd.DataFrame(out)
 
@@ -386,10 +424,31 @@ def aggregate_per_subject_model(trials):
                   .reset_index())
     comp["completion_rate"] = comp["completion_rate"] * 100.0
 
+    # ======== penalized metrics (all trials, failed folded in) ========
+    allt = trials.copy()
+    allt["tp_pen_trial"] = allt["id_nominal"] / allt["mt_penalized"]
+
+    cond_pen = (allt.groupby(["subject", "model", "condition"])
+                    .agg(id_cond=("id_nominal", "mean"),
+                         mtp_cond=("mt_penalized", "mean"))
+                    .reset_index())
+    cond_pen["tp_cond_pen"] = cond_pen["id_cond"] / cond_pen["mtp_cond"]
+    mom_pen = (cond_pen.groupby(["subject", "model"])
+                       .agg(throughput_meanofmeans_penalized=("tp_cond_pen", "mean"))
+                       .reset_index())
+
+    agg_pen = (allt.groupby(["subject", "model"])
+                   .agg(throughput_nominal_penalized=("tp_pen_trial", "mean"),
+                        movement_time_penalized=("mt_penalized", "mean"),
+                        path_efficiency_penalized=("path_efficiency", "mean"))
+                   .reset_index())
+
     eff = effective_throughput_per_subject_model(trials)
 
     psm = (agg.merge(mom, on=["subject", "model"], how="left")
               .merge(comp, on=["subject", "model"], how="left")
+              .merge(agg_pen, on=["subject", "model"], how="left")
+              .merge(mom_pen, on=["subject", "model"], how="left")
               .merge(eff, on=["subject", "model"], how="left"))
     return psm, cond
 
@@ -548,9 +607,16 @@ def summary_by_model(psm, metrics):
 # ======== PLOTS ========
 
 def _order_models(psm, metric):
-    med = psm.groupby("model")[metric].median()
-    asc = not HIGHER_IS_BETTER.get(metric, True)
-    return list(med.sort_values(ascending=asc).index)
+    # Sort low to high by the mean, independent of metric direction. The title
+    # states the direction so the good end stays unambiguous.
+    means = psm.groupby("model")[metric].mean()
+    return list(means.sort_values(ascending=True).index)
+
+
+def _fmt_stat(v):
+    if v is None or not np.isfinite(v):
+        return "nan"
+    return ("%.1f" % v) if abs(v) >= 10 else ("%.2f" % v)
 
 
 def plot_metric_box(psm, metric, ax):
@@ -559,16 +625,42 @@ def plot_metric_box(psm, metric, ax):
         ax.set_visible(False)
         return
     order = _order_models(psm, metric)
+    all_models = sorted(psm["model"].unique())
+    colors = plt.cm.tab10.colors
+    color_map = dict(zip(all_models, colors))
+    colors = [color_map[model] for model in order]
     if _HAS_SNS:
         sns.boxplot(data=data, x="model", y=metric, order=order, ax=ax,
                     showfliers=False, width=0.6,
-                    boxprops=dict(alpha=0.45), whiskerprops=dict(alpha=0.7),
-                    medianprops=dict(color="black", linewidth=2))
+                    whiskerprops=dict(alpha=0.7),
+                    medianprops=dict(color="black", linewidth=0.6))
+        # Per-box tab10 fill, kept translucent so the jittered points stay visible.
+        for i, patch in enumerate(ax.patches):
+            r, g, b = colors[i % len(colors)][:3]
+            patch.set_facecolor((r, g, b, 0.45))
+            patch.set_edgecolor((r, g, b, 0.9))
         sns.stripplot(data=data, x="model", y=metric, order=order, ax=ax,
                       color="black", alpha=0.55, size=4, jitter=0.18)
     else:
         groups = [data[data["model"] == m][metric].to_numpy() for m in order]
         ax.boxplot(groups, labels=order, showfliers=False)
+
+    # Mean and std written above each box, clear of the jittered points.
+    grp = data.groupby("model")[metric]
+    means = grp.mean()
+    stds = grp.std(ddof=1)
+    vmin = float(data[metric].min())
+    vmax = float(data[metric].max())
+    vr = (vmax - vmin) or 1.0
+    for i, m in enumerate(order):
+        col_max = float(data[data["model"] == m][metric].max())
+        sd = stds[m] if (m in stds.index and np.isfinite(stds[m])) else 0.0
+        ax.text(i, col_max + 0.03 * vr,
+                "mean %s\nstd %s" % (_fmt_stat(means[m]), _fmt_stat(sd)),
+                ha="center", va="bottom", fontsize=6.5, color="black",
+                linespacing=0.95)
+    ax.set_ylim(vmin - 0.05 * vr, vmax + 0.22 * vr)
+
     direction = "higher better" if HIGHER_IS_BETTER.get(metric, True) else "lower better"
     ax.set_title("%s (%s)" % (metric, direction), fontsize=10)
     ax.set_xlabel("")
