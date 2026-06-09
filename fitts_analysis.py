@@ -259,7 +259,7 @@ def segment_trials(df, subject, model):
     row (target already advanced), so a genuine acquisition appears as
     hold_count == HOLD_FRAMES - 1 on this trial's own rows. Acquisition is flagged
     exactly on that value; any hold_count >= HOLD_FRAMES is the carried artifact
-    and is treated as 0. No look-ahead to the next block is used.
+    and is treated as 0. No look-ahead to the next block is used (Fixed after Pilot #3).
     """
     cx, cy = _infer_center(df)
 
