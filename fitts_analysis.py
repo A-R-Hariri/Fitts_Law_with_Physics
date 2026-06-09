@@ -83,13 +83,15 @@ TARGET_RADII = [20, 10]
 # (the cursor always starts at screen center). Fallback is SCREEN_SIZE / 2.
 SCREEN_CENTER = None
 
-# The cursor is initialized at screen center, so the very first target of the
-# session is a half-amplitude centering move, not a ring-to-ring trial. Drop only
-# that one (ISO convention), leaving 4 conditions x 8 - 1 = 31 scored trials. The
-# per-condition transition targets (trials 8, 16, 24) start at the previous
-# condition's last target and are full movements, so they are kept.
-DROP_FIRST_MOVE = True
+# The task presents 4 conditions x 8 targets = 32 trials per (subject, model).
+# No targets are dropped by default. If the runner switches to a phantom next
+# target on the final acquisition and logs 1-2 artifact frames before the session
+# closes, those are caught by MIN_TRIAL_FRAMES below and silently excluded.
+# Set DROP_FIRST_PER_CONDITION = True to drop the first target of each condition
+# (28 trials, ISO multidirectional convention).
+DROP_FIRST_MOVE = False
 DROP_FIRST_PER_CONDITION = False
+MIN_TRIAL_FRAMES = 5  # blocks shorter than this are pure acquisition artifacts
 
 # Quality metrics that require reaching the target (overshoot, stopping
 # distance, reaction time) and the success-only throughput / MT use acquired
@@ -100,6 +102,11 @@ DWELL_TIME = HOLD_FRAMES / FRAME_RATE
 MIN_TRIALS_FOR_WE = 3       # minimum successful trials per condition for We
 DIR_MIN_STEP_PX = 2.0       # per-frame step below this is ignored for direction
 DIR_MERGE_PX = 15.0         # a cardinal segment shorter than this is treated as jitter and merged
+# Minimum valid movement time after dwell subtraction. Anything shorter means
+# the cursor was already inside the target when it appeared (trivial acquisition:
+# no real Fitts movement occurred). These trials count for completion rate but
+# are excluded from MT and throughput averages to prevent ID/~0 TP spikes.
+MT_MIN_VALID = 2.0 / FRAME_RATE   # 2 frames
 
 # Direction of improvement, used only for sorting and reporting.
 HIGHER_IS_BETTER = {
@@ -318,9 +325,17 @@ def segment_trials(df, subject, model):
         # dwell on every acquired target; failures never dwell, so their penalized
         # time is the full elapsed duration with nothing subtracted.
         t_acq = (float(blk["time"].iloc[acq_i]) + 1.0 / FRAME_RATE) if success else np.nan
-        mt = (t_acq - t_start - DWELL_TIME) if success else np.nan
-        if success and not np.isnan(mt):
-            mt = max(mt, 1.0 / FRAME_RATE)
+        mt_raw = (t_acq - t_start - DWELL_TIME) if success else np.nan
+        # Trivial acquisition: cursor was already inside the target when it
+        # appeared (e.g. it drifted there during a preceding timeout). The hold
+        # counter reaches 29 within one dwell window, giving near-zero or negative
+        # MT after dwell subtraction. Exclude from MT/TP averages so that ID/~0
+        # cannot spike the mean-of-ratios, while keeping success=1 so the trial
+        # still counts toward completion rate.
+        if success and (np.isnan(mt_raw) or mt_raw < MT_MIN_VALID):
+            mt = np.nan
+        else:
+            mt = mt_raw
         mt_penalized = mt if success else max(t_end - t_start, 1.0 / FRAME_RATE)
 
         # Path from the start to the selection point (acquisition or timeout).
