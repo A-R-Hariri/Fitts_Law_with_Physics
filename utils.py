@@ -345,3 +345,161 @@ class RunningNorm(nn.Module):
         self.running_mean.copy_(self.init_mean)
         self.running_sq.copy_(self.init_sq)
         self.n_updates.fill_(self.prior_weight) 
+
+
+
+# ======== TRAINING & VALIDATING ========
+def train(model, train_loader, val_loader, name,
+          loss_fn=nn.CrossEntropyLoss(),
+          return_emb=False, return_logits=False,
+          epochs=EPOCHS, lr=LR_INIT, min_lr=LR_MIN,
+          lr_factor=LR_FACTOR, lr_patience=LR_PATIENCE, 
+          patience=PATIENCE, device=DEVICE,
+          verbose=VERBOSE, save_chkp=False):
+
+    model.to(device)
+    opt = Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
+    sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="min", factor=lr_factor, patience=lr_patience, min_lr=min_lr)
+    scaler = GradScaler(enabled=(device=="cuda"))
+
+    best_val = 1e9
+    best_state = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+    wait = 0
+    best_epoch = 0
+
+    if save_chkp:
+        os.makedirs(f"{CHECKPOINT_PATH}/{name}/", exist_ok=True)
+
+    for ep in range(1, epochs + 1):
+        model.train()
+        total_loss = torch.tensor(0.0, device=device)
+        correct = torch.tensor(0.0, device=device)
+        total = 0
+        step = 0
+        pbar = tqdm(total=len(train_loader), desc=f"{name} | Ep {ep}", 
+                    leave=True, dynamic_ncols=True, disable=not verbose)
+
+        for xb, yb, *_ in train_loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+
+            opt.zero_grad(set_to_none=True)
+            with autocast(device_type="cuda", enabled=(device=="cuda")):
+                if return_emb and return_logits:
+                    emb, logits = model(xb, return_emb, return_logits)
+                    loss = loss_fn(emb, logits, yb)
+                elif return_emb:
+                    emb, logits = model(xb, return_emb, return_logits)
+                    loss = loss_fn(emb, yb)
+                else:
+                    logits = model(xb)
+                    loss = loss_fn(logits, yb)                    
+
+            scaler.scale(loss).backward()
+            clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+
+            total_loss += loss.detach()
+            correct += (logits.argmax(1) == yb).sum()
+            total += yb.numel()
+            step += 1
+
+            if not(step % UPDATE_EVERY):
+                pbar.update(UPDATE_EVERY)
+                pbar.set_postfix(
+                    loss=f"{total_loss.item() / step:10.8f}",
+                    acc=f"{correct.item() / max(1, total):6.4f}",
+                    LR=f"{opt.param_groups[0]['lr']:8.6f}")
+
+        if step % UPDATE_EVERY:
+            pbar.update(step % UPDATE_EVERY)
+
+        val_acc, val_loss, val_bal, val_conf = evaluate(model, val_loader, loss_fn, 
+                                            return_emb, return_logits, device)
+        sch.step(val_loss)
+
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+            wait = 0
+            best_epoch = ep
+        else:
+            wait += 1
+            if wait >= patience:
+                if verbose:
+                    tqdm.write(f"{name} | Early stop")
+                pbar.close()
+                break
+
+        pbar.set_postfix(
+            loss=f"{total_loss.item() / max(1, len(train_loader)):10.6f}",
+            acc=f"{correct.item() / max(1, total):6.4f}",
+            val_loss=f"{val_loss:10.6f}",
+            val_acc=f"{val_acc:6.4f}",
+            val_bal = f"{val_bal:6.4f}", 
+            LR=f"{opt.param_groups[0]['lr']:8.6f}",
+            wait=f"{wait:3.0f}")
+        pbar.close()
+
+        if verbose:
+            val_conf_norm = val_conf / val_conf.sum(dim=1, keepdim=True).clamp(min=1.0)
+            for i, row in enumerate(val_conf_norm):
+                print(f"  c{i}: [" + ", ".join([f"{v.item():.2f}" for v in row]) +
+                        f"]  recall={row[i].item():.2f}")
+            
+        if save_chkp:
+            checkpoint = {'epoch': ep,
+                        'model_state_dict': model.state_dict()}
+            torch.save(checkpoint, f"{CHECKPOINT_PATH}/{name}/chkp_{ep:03d}.pt")
+
+    model.load_state_dict(best_state)
+    checkpoint = {'epoch': best_epoch,
+                'model_state_dict': model.state_dict()}
+    if save_chkp:
+        torch.save(checkpoint, f"{CHECKPOINT_PATH}/{name}/{name}.pt")
+
+    return model
+
+
+# ---- VALIDATION ----
+@torch.no_grad()
+def evaluate(model, loader, loss_fn, 
+             return_emb, return_logits, device):
+    model.eval()
+    # Initialize on GPU
+    lsum = torch.tensor(0.0, device=device)
+    cor = torch.tensor(0.0, device=device)
+    tot = torch.tensor(0,   device=device, dtype=torch.long)
+    class_cor   = torch.zeros(CLASSES, device=device)   # per-class correct
+    class_tot   = torch.zeros(CLASSES, device=device)   # per-class total
+    val_conf_matrix = torch.zeros((CLASSES, CLASSES), device=device)
+
+    for xb, yb, *_ in loader:
+        xb = xb.to(device, non_blocking=True)
+        yb = yb.to(device, non_blocking=True)
+        with torch.amp.autocast(device_type="cuda", enabled=(device=="cuda")):
+            if return_emb and return_logits:
+                emb, logits = model(xb, return_emb, return_logits)
+                loss = loss_fn(emb, logits, yb)
+            else:
+                logits = model(xb)
+                loss = loss_fn(logits, yb)  
+
+        preds = logits.argmax(1)
+        lsum += loss.detach()
+        cor += (preds == yb).sum()
+        tot += yb.numel()
+        hits = (preds == yb).float()
+        class_cor.scatter_add_(0, yb, hits)
+        class_tot.scatter_add_(0, yb, torch.ones_like(hits))
+        idx = (yb * CLASSES + preds).clamp(0, CLASSES * CLASSES - 1)
+        batch_counts = torch.bincount(idx, minlength=CLASSES * CLASSES).float().view(CLASSES, CLASSES)
+        val_conf_matrix += batch_counts
+        mask = class_tot > 0
+        bal_acc = (class_cor[mask] / class_tot[mask]).mean().item()
+
+    return (cor.item() / max(1, tot), 
+            lsum.item() / max(1, len(loader)),
+            bal_acc, val_conf_matrix)
