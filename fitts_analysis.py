@@ -99,9 +99,9 @@ MIN_TRIAL_FRAMES = 5  # blocks shorter than this are pure acquisition artifacts
 # direction-change ratio use all trials.
 MOVE_STEP_PX = 1.0          # cursor step magnitude that counts as movement onset
 DWELL_TIME = HOLD_FRAMES / FRAME_RATE
-MIN_TRIALS_FOR_WE = 3       # minimum successful trials per condition for We
+MIN_TRIALS_FOR_WE = 1       # minimum successful trials per condition for We
 DIR_MIN_STEP_PX = 2.0       # per-frame step below this is ignored for direction
-DIR_MERGE_PX = 15.0         # a cardinal segment shorter than this is treated as jitter and merged
+DIR_MERGE_PX = 1.0         # a cardinal segment shorter than this is treated as jitter and merged
 # Minimum valid movement time after dwell subtraction. Anything shorter means
 # the cursor was already inside the target when it appeared (trivial acquisition:
 # no real Fitts movement occurred). These trials count for completion rate but
@@ -307,6 +307,10 @@ def segment_trials(df, subject, model):
         # >= HOLD_FRAMES as 0, then flag acquired exactly on HOLD_FRAMES - 1.
         hold_arr = blk["hold_count"].to_numpy().astype(float)
         hold_adj = np.where(hold_arr >= HOLD_FRAMES, 0.0, hold_arr)
+        ############################################ FIX FOR PILOT ONLY ################################################################
+        inside_arr = blk["inside"].to_numpy().astype(int)
+        inside_arr[hold_arr >= HOLD_FRAMES] = 0 
+        ############################################################################################################
         acq_rows = np.where(hold_adj == (HOLD_FRAMES - 1))[0]
         success = acq_rows.size > 0
         acq_i = int(acq_rows[-1]) if success else (n - 1)
@@ -366,6 +370,9 @@ def segment_trials(df, subject, model):
         # Overshoot count: number of inside 1 -> 0 transitions within the block
         # (each is an enter-then-leave before final acquisition).
         inside = blk["inside"].to_numpy().astype(int)
+        ############################################### FIX FOR PILOT ONLY #############################################################
+        inside = inside_arr
+        ############################################################################################################
         leaves = int(np.sum((inside[:-1] == 1) & (inside[1:] == 0))) if n > 1 else 0
         overshoots = leaves
 

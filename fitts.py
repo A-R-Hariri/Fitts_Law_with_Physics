@@ -19,7 +19,17 @@ from utils import *
 
 
 VEL_CONSTANT = 20.0
-
+ 
+MODEL_DICT = {  'cross_mhcnn_raw_base':  'b',
+                'cross_mhcnn_raw_1va':  '1',
+                'cross_mhcnn_raw_base-rn':  'n',
+                'cross_mhcnn_raw_rest':  'r',
+                'cross_mhcnn_raw_trp':  't',
+                'cross_mhcnn_segmented_base': 's',
+                'within_cnnhcf_raw_base-5':  'w',
+                'within_mhcnn_raw_base-ft-1':  'f',
+                'within_mhcnn_raw_base-ft-5':  '5',
+                }
 
 # Placeholder for the proxy object initialized in main.py
 SharedContext = None
@@ -157,13 +167,27 @@ class Dashboard(QWidget):
     def update_model_list(self, model_names):
         self.model_box.blockSignals(True)
         self.model_box.clear()
-        self.model_box.addItems(model_names)
+        self.model_box.addItems([MODEL_DICT[m] for m in model_names])
         self.model_box.blockSignals(False)
         if self.sc.active_model_name in model_names:
             self.model_box.setCurrentText(self.sc.active_model_name)
+            if 'within' in self.sc.active_model_name:
+                self.speed_spin.setValue(1.0)
+            else:
+                self.speed_spin.setValue(1.2)
+            self.update_controls()
+            self.update_params()
 
     def update_model(self, text):
-        self.sc.active_model_name = text
+        for k in MODEL_DICT.keys():
+            if MODEL_DICT[k] == text:
+                self.sc.active_model_name = k
+                if 'within' in k:
+                    self.speed_spin.setValue(1.0)
+                else:
+                    self.speed_spin.setValue(1.2)
+                self.update_controls()
+                self.update_params()
 
     def update_controls(self):
         self.sc.flip_lr = self.flip_check.isChecked()
@@ -263,7 +287,7 @@ class FittsTest(QWidget):
         self.ring_sequence = [0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11,
                                6, 0, 7, 1, 8, 2, 9, 3, 10, 4, 11, 5]
         self.ring_index = 0
-        self.combinations = [(r, t) for t in params.get('target_radius_list', [20]) for r in params.get('ring_radius_list', [300])]
+        self.combinations = list(zip(params.get('ring_radius_list', [300]), params.get('target_radius_list', [20]),))
         self.current_combo_idx = 0
         self.init_logger()
         self.init_target()

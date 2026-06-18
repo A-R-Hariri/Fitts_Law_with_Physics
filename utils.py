@@ -18,6 +18,9 @@ from libemg.feature_extractor import FeatureExtractor
 from torch.nn.utils import clip_grad_norm_
 
 
+NAME = 'test1'
+
+
 def is_notebook():
     try:
         from IPython import get_ipython; shell = get_ipython()
@@ -31,13 +34,11 @@ else:
     from tqdm import tqdm
 
 DTYPE = np.float32
-PICKLE_PATH = 'checkpoints3'; FIGURE_PATH = 'figures'; 
+PICKLE_PATH = 'checkpoints'; FIGURE_PATH = 'figures'; 
 CHECKPOINT_PATH = PICKLE_PATH; 
-RESULTS_PATH = f"{FIGURE_PATH}/results.csv"
-PATH = PICKLE_PATH; PATH_MODELS = PATH
 SEQ = 40; INC = 2; CH = 8; CLASSES = 5; VAL_CUTOFF = 332
 WORKERS = 8; PRE_FETCH = 2; VERBOSE=True; DEVICE = 'cuda'
-UPDATE_EVERY = 2; PRESIST_WORKER = False; PIN_MEMORY = True
+UPDATE_EVERY = 2; PRESIST_WORKER = True; PIN_MEMORY = True
 
 _GESTURE_LABELS = {0: "NM", 1: "HC", 2: "FX", 3: "EX", 4: "HO"}
 
@@ -51,31 +52,21 @@ N_SUBJECTS = 306; MARGIN = 0.5; W_HARD = 1.0; W_SOFT = 0.0
 ALPHA_START = 0.01; ALPHA_END = 0.25; WARMUP = 25
 TAU = float('inf')
 
-NAME = 'test'
 FITTS_PATH = os.path.join('fitts_logs', NAME)
 DATA_PATH = os.path.join('emg_logs', NAME)
 SGT_PATH = os.path.join('user_sgt', NAME)
 
+TOTAL_REPS = 6
+
+FEAT_LIST = ['WENG'] 
 SAMPLING_RATE = 200
-FEATURE_LIST = ['WENG']
 FEATURE_DIC = {'WENG_fs': SAMPLING_RATE}
 
-SAMPLING_RATE = 200
-FEATURE_DIC = {
-               'WENG_fs': SAMPLING_RATE,
-               'DFTR_fs': SAMPLING_RATE,
-               'MDF_fs': SAMPLING_RATE,
-               'MNF_fs': SAMPLING_RATE,
-               'SM_fs': SAMPLING_RATE,
-               'WV_fs': SAMPLING_RATE,
-               'WENT_fs': SAMPLING_RATE,
-               }
-
 PARAMS = {
-        'frame_rate': 60, 'mode': 'B', 'hold_frames_required': 30,
-        'target_timeout_frames': 420, 'max_targets': 8,
-        'target_radius_list': [20,10], 'target_distance_range': [200, 400],
-        'ring_radius_list': [300,450], 'screen_size': (1690, 980),
+        'frame_rate': 60, 'mode': 'B', 'hold_frames_required': 45,
+        'target_timeout_frames': 480, 'max_targets': 12,
+        'target_radius_list': [30, 21, 12], 'target_distance_range': [200, 400],
+        'ring_radius_list': [300, 375, 450], 'screen_size': (1690, 980),
         'physics': {'enabled': False, 'mass': 5, 
                     'max_acceleration': 0.08, 'damping': 1.0},
         'c_vel': 1, 'use_test_input': False, 'snap_back' : False,
@@ -97,9 +88,9 @@ def create_loader(x, y, s, batch=BATCH_SIZE, shuffle=False,
                   persistent_workers=PRESIST_WORKER,
                   pin_memory=PIN_MEMORY):
     return DataLoader(
-            TensorDataset(torch.from_numpy(x), 
-                            torch.from_numpy(y),
-                            torch.from_numpy(s)),
+            TensorDataset(torch.from_numpy(x.astype(DTYPE)), 
+                            torch.from_numpy(y.astype(np.int64)),
+                            torch.from_numpy(s.astype(np.int64))),
             batch_size=batch,
             shuffle=shuffle,
             num_workers=workers,
@@ -466,7 +457,7 @@ def train(model, train_loader, val_loader, name,
 # ---- VALIDATION ----
 @torch.no_grad()
 def evaluate(model, loader, loss_fn, 
-             return_emb, return_logits, device):
+             return_emb=True, return_logits=False, device='cuda'):
     model.eval()
     # Initialize on GPU
     lsum = torch.tensor(0.0, device=device)
