@@ -75,18 +75,20 @@ if __name__ == "__main__":
         if reps == 5:
             MODEL = f'within_cnnhcf_raw_base-{reps}'
 
-            train_feats = extract_sub(train_windows, FEAT_LIST, FEATURE_DIC).transpose(0, 2, 1)
-            train_feat_loader = create_loader(train_feats, train_meta['classes'], np.zeros_like(train_meta['classes']), 
-                                batch=BATCH_SIZE, shuffle=True, 
-                                workers=WORKERS, persistent_workers=PRESIST_WORKER)
-            val_feats = extract_sub(val_windows, FEAT_LIST, FEATURE_DIC).transpose(0, 2, 1)
-            val_feat_loader = create_loader(val_feats, val_meta['classes'], np.zeros_like(val_meta['classes']), 
-                                batch=BATCH_SIZE, shuffle=False, 
-                                workers=WORKERS, persistent_workers=PRESIST_WORKER)
-            n_feat_sub = train_feats.shape[1]
+            train_feats = extract_sub(train_windows, FEAT_LIST, FEATURE_DIC)  # (N, 4, F)
+            val_feats   = extract_sub(val_windows,   FEAT_LIST, FEATURE_DIC)  # (N, 4, F)
 
-            train_feats, val_feats, _  = normalize_features(
-                        train_feats,  val_feats,  val_feats)
+            train_feats, val_feats, _ = normalize_features(train_feats, val_feats, val_feats)
+
+            train_feats = train_feats.transpose(0, 2, 1)  # (N, F, 4)
+            val_feats   = val_feats.transpose(0, 2, 1)
+            n_feat_sub  = train_feats.shape[1]
+            
+            train_feat_loader = create_loader(train_feats, train_meta['classes'], np.zeros_like(train_meta['classes']),
+                                batch=BATCH_SIZE, shuffle=True, workers=WORKERS, persistent_workers=PRESIST_WORKER)
+            val_feat_loader   = create_loader(val_feats, val_meta['classes'], np.zeros_like(val_meta['classes']),
+                                batch=BATCH_SIZE, shuffle=False, workers=WORKERS, persistent_workers=PRESIST_WORKER)
+
 
             model = CNN_HCF(n_feat_sub)
             train(model=model, name=MODEL, 

@@ -55,9 +55,7 @@ class MultiModelWrapper(nn.Module):
             x = extract_sub(x, self.feature_list, self.feature_dic)  # (B, 4, F)
             x = x.transpose(0, 2, 1)                                 # (B, F, 4)
             # normalize using feature-level scaler
-            shape = x.shape
-            x = (x.reshape(-1, shape[-1]) - self.mean) / self.std
-            x = x.reshape(shape)
+            x = (x - self.mean[:, None]) / self.std[:, None]  # (B, F, 4)
             x = torch.from_numpy(x).to(self.device, non_blocking=True).float()
         
         if isinstance(x, np.ndarray):
@@ -112,7 +110,7 @@ def input_thread(sockets_dict, sc):
                 data, _ = sock.recvfrom(1024)
                 
                 name = sc.active_model_name
-                if 'hcf' in name: active_cat = 'hcf'
+                if 'within' in name: active_cat = 'within'
                 else: active_cat = 'normal'
                 
                 if sock != sockets_dict.get(active_cat):
@@ -139,6 +137,7 @@ def input_thread(sockets_dict, sc):
         except: pass
 
 if __name__ == "__main__":
+
     filters = [libemg.data_handler.RegexFilter(left_bound="C_", right_bound="_R", 
                                             values=["0","1","2","3","4"], description='classes'),
             libemg.data_handler.RegexFilter(left_bound="R_", right_bound="_emg.csv", 
@@ -149,10 +148,9 @@ if __name__ == "__main__":
     train_windows, train_meta = offline_odh.parse_windows(SEQ, INC)
 
     train_feats = extract_sub(train_windows, FEAT_LIST, FEATURE_DIC).transpose(0, 2, 1)  # (N, F, 4)
-    shape_tr_feat = train_feats.shape
-    feat_scaler = StandardScaler()
-    feat_scaler.fit(train_feats.reshape(-1, shape_tr_feat[-1]))
-    _feat_std, _feat_mean = feat_scaler.scale_, feat_scaler.mean_
+    _feat_mean = train_feats.mean(axis=(0, 2))  # (F,)
+    _feat_std  = train_feats.std(axis=(0, 2))   # (F,)
+    train_meta['classes'] = remap_labels(train_meta['classes'])
 
     manager = Manager()
     SharedContext = manager.Namespace()
@@ -178,21 +176,21 @@ if __name__ == "__main__":
                     'within_mhcnn_raw_base-ft-5',
                     ]
     
-    # random.shuffle(model_names)
+    random.shuffle(model_names)
         
     loaded_models = load_all_models(model_names)
     SharedContext.available_models = list(loaded_models.keys())
     SharedContext.active_model_name = model_names[0]
 
-    dict_normal = {k: v for k, v in loaded_models.items() if 'hcf' not in k}
-    dict_within_hcf = {k: v for k, v in loaded_models.items() if 'hcf' in k}
+    dict_normal = {k: v for k, v in loaded_models.items() if 'within' not in k}
+    dict_within_within = {k: v for k, v in loaded_models.items() if 'within' in k}
 
     wrapper_normal = MultiModelWrapper(dict_normal, SharedContext).to(DEVICE).eval()
-    wrapper_within_hcf = MultiModelWrapper(dict_within_hcf, SharedContext, std=_feat_std, 
+    wrapper_within_within = MultiModelWrapper(dict_within_within, SharedContext, std=_feat_std, 
                                            mean=_feat_mean).to(DEVICE).eval()
 
     o_class_normal = libemg.emg_predictor.EMGClassifier(wrapper_normal)
-    o_class_within_hcf = libemg.emg_predictor.EMGClassifier(wrapper_within_hcf)
+    o_class_within_within = libemg.emg_predictor.EMGClassifier(wrapper_within_within)
 
     o_class_normal.add_velocity([], [])
     th_max_path = join(CHECKPOINT_PATH, 'th_max_dic.npy')
@@ -201,25 +199,24 @@ if __name__ == "__main__":
         o_class_normal.th_max_dic = np.load(th_max_path, allow_pickle=True).item()
         o_class_normal.th_min_dic = np.load(th_min_path, allow_pickle=True).item()
     
-    o_class_within_hcf.add_velocity(train_windows, train_meta['classes'])
-    # o_class_within_hcf.feature_params = FEATURE_DIC
+    o_class_within_within.add_velocity(train_windows, train_meta['classes'])
 
     p, smm = libemg.streamers.myo_streamer()
     odh = libemg.data_handler.OnlineDataHandler(smm)
-    p_norm, p_hcf = 12346, 12347
+    p_norm, p_within = 12346, 12347
     on_normal = libemg.emg_predictor.OnlineEMGClassifier(o_class_normal, SEQ, INC, odh, 
                                                         ip='127.0.0.1', port=p_norm,
                                                         features=None, output_format='probabilities')
-    on_within_hcf = libemg.emg_predictor.OnlineEMGClassifier(o_class_within_hcf, SEQ, INC, odh, 
-                                                            ip='127.0.0.1', port=p_hcf,
+    on_within_within = libemg.emg_predictor.OnlineEMGClassifier(o_class_within_within, SEQ, INC, odh, 
+                                                            ip='127.0.0.1', port=p_within,
                                                             features=None, output_format='probabilities')
     
     on_normal.run(block=False)
-    on_within_hcf.run(block=False)
+    on_within_within.run(block=False)
 
     s_norm = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s_norm.bind(('127.0.0.1', p_norm))
-    s_hcf = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s_hcf.bind(('127.0.0.1', p_hcf))
-    sockets_dict = {'normal': s_norm, 'hcf': s_hcf}
+    s_within = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s_within.bind(('127.0.0.1', p_within))
+    sockets_dict = {'normal': s_norm, 'within': s_within}
 
     threading.Thread(target=input_thread, args=(sockets_dict, SharedContext), daemon=True).start()
 
