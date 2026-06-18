@@ -45,15 +45,20 @@ class MultiModelWrapper(nn.Module):
                     init_mean=pop_mean, init_std=pop_std).eval()
 
     def forward(self, x):
-        # if self.sc.flip_lr:
-        #     x = np.roll(x, 4, 1)
-
         name = self.sc.active_model_name
         if name not in self.models:
             return None
         
         if 'hcf' in name:
-            x = (x - self.mean) / self.std
+            if isinstance(x, torch.Tensor):
+                x = x.cpu().numpy()
+            x = extract_sub(x, self.feature_list, self.feature_dic)  # (B, 4, F)
+            x = x.transpose(0, 2, 1)                                 # (B, F, 4)
+            # normalize using feature-level scaler
+            shape = x.shape
+            x = (x.reshape(-1, shape[-1]) - self.mean) / self.std
+            x = x.reshape(shape)
+            x = torch.from_numpy(x).to(self.device, non_blocking=True).float()
         
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x).to(self.device, non_blocking=True).float()
@@ -142,11 +147,12 @@ if __name__ == "__main__":
     offline_dh.get_data(folder_location=SGT_PATH, regex_filters=filters, delimiter=',')
     offline_odh = offline_dh.isolate_data("reps", list(range(TOTAL_REPS - 1)), fast=True)
     train_windows, train_meta = offline_odh.parse_windows(SEQ, INC)
-    shape_tr = train_windows.shape
-    scaler = StandardScaler()
-    _ = scaler.fit_transform(train_windows.reshape(-1, shape_tr[-1]))   # fit + transform on train
-    _std, _mean = scaler.scale_, scaler.mean_
-    train_meta['classes'] = remap_labels(train_meta['classes'])
+
+    train_feats = extract_sub(train_windows, FEAT_LIST, FEATURE_DIC).transpose(0, 2, 1)  # (N, F, 4)
+    shape_tr_feat = train_feats.shape
+    feat_scaler = StandardScaler()
+    feat_scaler.fit(train_feats.reshape(-1, shape_tr_feat[-1]))
+    _feat_std, _feat_mean = feat_scaler.scale_, feat_scaler.mean_
 
     manager = Manager()
     SharedContext = manager.Namespace()
@@ -162,17 +168,17 @@ if __name__ == "__main__":
     SharedContext.params = PARAMS
 
     model_names = [ 'cross_mhcnn_raw_base',
+                    'within_cnnhcf_raw_base-5',
                     'cross_mhcnn_raw_1va',
                     'cross_mhcnn_raw_base-rn',
                     'cross_mhcnn_raw_rest',
                     'cross_mhcnn_raw_trp',
                     'cross_mhcnn_segmented_base',
-                    'within_cnnhcf_raw_base-5',
                     'within_mhcnn_raw_base-ft-1',
                     'within_mhcnn_raw_base-ft-5',
                     ]
     
-    random.shuffle(model_names)
+    # random.shuffle(model_names)
         
     loaded_models = load_all_models(model_names)
     SharedContext.available_models = list(loaded_models.keys())
@@ -182,7 +188,8 @@ if __name__ == "__main__":
     dict_within_hcf = {k: v for k, v in loaded_models.items() if 'hcf' in k}
 
     wrapper_normal = MultiModelWrapper(dict_normal, SharedContext).to(DEVICE).eval()
-    wrapper_within_hcf = MultiModelWrapper(dict_within_hcf, SharedContext, std=_std, mean=_mean).to(DEVICE).eval()
+    wrapper_within_hcf = MultiModelWrapper(dict_within_hcf, SharedContext, std=_feat_std, 
+                                           mean=_feat_mean).to(DEVICE).eval()
 
     o_class_normal = libemg.emg_predictor.EMGClassifier(wrapper_normal)
     o_class_within_hcf = libemg.emg_predictor.EMGClassifier(wrapper_within_hcf)
@@ -195,7 +202,7 @@ if __name__ == "__main__":
         o_class_normal.th_min_dic = np.load(th_min_path, allow_pickle=True).item()
     
     o_class_within_hcf.add_velocity(train_windows, train_meta['classes'])
-    o_class_within_hcf.feature_params = FEATURE_DIC
+    # o_class_within_hcf.feature_params = FEATURE_DIC
 
     p, smm = libemg.streamers.myo_streamer()
     odh = libemg.data_handler.OnlineDataHandler(smm)
@@ -205,7 +212,7 @@ if __name__ == "__main__":
                                                         features=None, output_format='probabilities')
     on_within_hcf = libemg.emg_predictor.OnlineEMGClassifier(o_class_within_hcf, SEQ, INC, odh, 
                                                             ip='127.0.0.1', port=p_hcf,
-                                                            features=FEAT_LIST, output_format='probabilities')
+                                                            features=None, output_format='probabilities')
     
     on_normal.run(block=False)
     on_within_hcf.run(block=False)
