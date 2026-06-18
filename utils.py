@@ -494,3 +494,25 @@ def evaluate(model, loader, loss_fn,
     return (cor.item() / max(1, tot), 
             lsum.item() / max(1, len(loader)),
             bal_acc, val_conf_matrix)
+
+def normalize_features(tr, va, te):
+    shape_tr = tr.shape
+    shape_va = va.shape
+    shape_te = te.shape
+
+    # flatten to 2D for scaler: (N, F) or (N*N_SUB, F)
+    tr_2d = tr.reshape(-1, shape_tr[-1])
+    va_2d = va.reshape(-1, shape_va[-1])
+    te_2d = te.reshape(-1, shape_te[-1])
+
+    scaler = StandardScaler()
+    tr_2d  = scaler.fit_transform(tr_2d)   # fit + transform on train
+    va_2d  = scaler.transform(va_2d)       # transform only
+    te_2d  = scaler.transform(te_2d)       # transform only
+
+    return (np.nan_to_num(tr_2d.reshape(shape_tr), nan=0.0, 
+            posinf=0.0, neginf=0.0).astype(np.float32),
+            np.nan_to_num(va_2d.reshape(shape_va), nan=0.0, 
+            posinf=0.0, neginf=0.0).astype(np.float32),
+            np.nan_to_num(te_2d.reshape(shape_te), nan=0.0, 
+            posinf=0.0, neginf=0.0).astype(np.float32))

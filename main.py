@@ -28,7 +28,7 @@ n_feat_sub = dummy_feats.shape[1]  # F per sub-window
 class MultiModelWrapper(nn.Module):
     def __init__(self, models_dict, shared_context, 
                  feature_list=FEAT_LIST, feature_dic=FEATURE_DIC,
-                 device=DEVICE):
+                 device=DEVICE, std=None, mean=None):
         super().__init__()
         self.models = nn.ModuleDict(models_dict)
         self.device = device
@@ -37,6 +37,8 @@ class MultiModelWrapper(nn.Module):
         self.active_model = None
         self.feature_list = feature_list
         self.feature_dic = feature_dic
+        self.mean = mean
+        self.std = std
         self.fe = libemg.feature_extractor.FeatureExtractor()
 
         self.rn= RunningNorm(CH, tau=float('inf'),
@@ -49,6 +51,9 @@ class MultiModelWrapper(nn.Module):
         name = self.sc.active_model_name
         if name not in self.models:
             return None
+        
+        if 'hcf' in name:
+            x = (x - self.mean) / self.std
         
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x).to(self.device, non_blocking=True).float()
@@ -108,27 +113,41 @@ def input_thread(sockets_dict, sc):
                 if sock != sockets_dict.get(active_cat):
                     continue
 
-            parts = data.decode("utf-8").strip().split(' ')
-            if len(parts) >= 6:
-                probs_list = [float(p) for p in parts[:-2]]
-                raw_vel = float(parts[-2])          # [-1] is timestamp
-                gesture = np.argmax(np.array(probs_list))
-                
-                flip = sc.flip_lr
-                # speed_mult = sc.speed_multiplier * VEL_CONSTANT       # Applied in Fitts class instead
-                speed = np.clip(raw_vel, 0.0, 1.0) #* speed_mult
+                parts = data.decode("utf-8").strip().split(' ')
+                if len(parts) >= 6:
+                    probs_list = [float(p) for p in parts[:-2]]
+                    raw_vel = float(parts[-2])          # [-1] is timestamp
+                    gesture = np.argmax(np.array(probs_list))
+                    
+                    flip = sc.flip_lr
+                    # speed_mult = sc.speed_multiplier * VEL_CONSTANT       # Applied in Fitts class instead
+                    speed = np.clip(raw_vel, 0.0, 1.0) #* speed_mult
 
-                dx, dy = 0.0, 0.0
-                if gesture == 1: dy = 1
-                elif gesture == 4: dy = -1
-                elif gesture == 2: dx = 1 if flip else -1
-                elif gesture == 3: dx = -1 if flip else 1
+                    dx, dy = 0.0, 0.0
+                    if gesture == 1: dy = 1
+                    elif gesture == 4: dy = -1
+                    elif gesture == 2: dx = 1 if flip else -1
+                    elif gesture == 3: dx = -1 if flip else 1
 
-                sc.emg_x, sc.emg_y = dx * speed, dy * speed
-                sc.probs, sc.raw_velocity = probs_list, raw_vel
+                    sc.emg_x, sc.emg_y = dx * speed, dy * speed
+                    sc.probs, sc.raw_velocity = probs_list, raw_vel
         except: pass
 
 if __name__ == "__main__":
+    filters = [libemg.data_handler.RegexFilter(left_bound="C_", right_bound="_R", 
+                                            values=["0","1","2","3","4"], description='classes'),
+            libemg.data_handler.RegexFilter(left_bound="R_", right_bound="_emg.csv", 
+                                            values=[str(r) for r in range(TOTAL_REPS - 1)], description='reps')]
+    offline_dh = libemg.data_handler.OfflineDataHandler()
+    offline_dh.get_data(folder_location=SGT_PATH, regex_filters=filters, delimiter=',')
+    offline_odh = offline_dh.isolate_data("reps", list(range(TOTAL_REPS - 1)), fast=True)
+    train_windows, train_meta = offline_odh.parse_windows(SEQ, INC)
+    shape_tr = train_windows.shape
+    scaler = StandardScaler()
+    _ = scaler.fit_transform(train_windows.reshape(-1, shape_tr[-1]))   # fit + transform on train
+    _std, _mean = scaler.scale_, scaler.mean_
+    train_meta['classes'] = remap_labels(train_meta['classes'])
+
     manager = Manager()
     SharedContext = manager.Namespace()
     
@@ -163,7 +182,7 @@ if __name__ == "__main__":
     dict_within_hcf = {k: v for k, v in loaded_models.items() if 'hcf' in k}
 
     wrapper_normal = MultiModelWrapper(dict_normal, SharedContext).to(DEVICE).eval()
-    wrapper_within_hcf = MultiModelWrapper(dict_within_hcf, SharedContext).to(DEVICE)
+    wrapper_within_hcf = MultiModelWrapper(dict_within_hcf, SharedContext, std=_std, mean=_mean).to(DEVICE).eval()
 
     o_class_normal = libemg.emg_predictor.EMGClassifier(wrapper_normal)
     o_class_within_hcf = libemg.emg_predictor.EMGClassifier(wrapper_within_hcf)
@@ -174,16 +193,6 @@ if __name__ == "__main__":
     if os.path.exists(th_max_path):
         o_class_normal.th_max_dic = np.load(th_max_path, allow_pickle=True).item()
         o_class_normal.th_min_dic = np.load(th_min_path, allow_pickle=True).item()
-
-    filters = [libemg.data_handler.RegexFilter(left_bound="C_", right_bound="_R", 
-                                            values=["0","1","2","3","4"], description='classes'),
-            libemg.data_handler.RegexFilter(left_bound="R_", right_bound="_emg.csv", 
-                                            values=[str(r) for r in range(TOTAL_REPS - 1)], description='reps')]
-    offline_dh = libemg.data_handler.OfflineDataHandler()
-    offline_dh.get_data(folder_location=SGT_PATH, regex_filters=filters, delimiter=',')
-    offline_odh = offline_dh.isolate_data("reps", list(range(TOTAL_REPS - 1)), fast=True)
-    train_windows, train_meta = offline_odh.parse_windows(SEQ, INC)
-    train_meta['classes'] = remap_labels(train_meta['classes'])
     
     o_class_within_hcf.add_velocity(train_windows, train_meta['classes'])
     o_class_within_hcf.feature_params = FEATURE_DIC

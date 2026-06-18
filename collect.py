@@ -85,6 +85,9 @@ if __name__ == "__main__":
                                 workers=WORKERS, persistent_workers=PRESIST_WORKER)
             n_feat_sub = train_feats.shape[1]
 
+            train_feats, val_feats, _  = normalize_features(
+                        train_feats,  val_feats,  val_feats)
+
             model = CNN_HCF(n_feat_sub)
             train(model=model, name=MODEL, 
                 train_loader=train_feat_loader,
