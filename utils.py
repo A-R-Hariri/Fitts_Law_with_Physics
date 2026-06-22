@@ -18,7 +18,7 @@ from libemg.feature_extractor import FeatureExtractor
 from torch.nn.utils import clip_grad_norm_
 
 
-NAME = 'test'
+NAME = '10'
 
 
 def is_notebook():

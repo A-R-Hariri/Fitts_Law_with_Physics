@@ -65,6 +65,8 @@ except Exception:
 
 warnings.filterwarnings("ignore")
 
+from utils import PARAMS
+
 
 # ======== CONFIG ========
 
@@ -72,12 +74,12 @@ FITTS_ROOT = "fitts_logs"
 OUT_DIR = "fitts_results"
 
 # Task parameters, must match the run that produced the logs.
-FRAME_RATE = 60
-HOLD_FRAMES = 30
-TIMEOUT_FRAMES = 420
-SCREEN_SIZE = (1690, 980)
-RING_RADII = [300, 450]
-TARGET_RADII = [20, 10]
+FRAME_RATE = PARAMS['frame_rate']
+HOLD_FRAMES = PARAMS['hold_frames_required']
+TIMEOUT_FRAMES = PARAMS['target_timeout_frames']
+SCREEN_SIZE = PARAMS['screen_size']
+RING_RADII = PARAMS['ring_radius_list']
+TARGET_RADII = PARAMS['target_radius_list']
 
 # Screen center. None infers it per file from the first logged cursor position
 # (the cursor always starts at screen center). Fallback is SCREEN_SIZE / 2.
@@ -160,7 +162,7 @@ NUM_COLS = ["time", "frame", "cursor_x", "cursor_y", "target_x", "target_y",
 
 
 def _is_test_name(name):
-    return name.lower().startswith("test")
+    return 'test' in name.lower()
 
 
 def discover_logs(root):
@@ -306,12 +308,12 @@ def segment_trials(df, subject, model):
         # on the next block as the post-switch artifact). Treat any hold_count
         # >= HOLD_FRAMES as 0, then flag acquired exactly on HOLD_FRAMES - 1.
         hold_arr = blk["hold_count"].to_numpy().astype(float)
-        hold_adj = np.where(hold_arr >= HOLD_FRAMES, 0.0, hold_arr)
+        # hold_adj = np.where(hold_arr >= HOLD_FRAMES, 0.0, hold_arr)
         ############################################ FIX FOR PILOT ONLY ################################################################
         inside_arr = blk["inside"].to_numpy().astype(int)
-        inside_arr[hold_arr >= HOLD_FRAMES] = 0 
+        # inside_arr[hold_arr >= HOLD_FRAMES] = 0 
         ############################################################################################################
-        acq_rows = np.where(hold_adj == (HOLD_FRAMES - 1))[0]
+        acq_rows = np.where(hold_arr == HOLD_FRAMES)[0]
         success = acq_rows.size > 0
         acq_i = int(acq_rows[-1]) if success else (n - 1)
         end_i = acq_i
@@ -371,7 +373,7 @@ def segment_trials(df, subject, model):
         # (each is an enter-then-leave before final acquisition).
         inside = blk["inside"].to_numpy().astype(int)
         ############################################### FIX FOR PILOT ONLY #############################################################
-        inside = inside_arr
+        # inside = inside_arr
         ############################################################################################################
         leaves = int(np.sum((inside[:-1] == 1) & (inside[1:] == 0))) if n > 1 else 0
         overshoots = leaves

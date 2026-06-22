@@ -25,3 +25,4 @@ fitts_analysis*.py
 /Analysis
 fitts_logs*
 *.txt
+/main_study
