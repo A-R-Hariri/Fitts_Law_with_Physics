@@ -9,31 +9,44 @@ regression, runs repeated-measures statistics across models (Friedman, pairwise
 Wilcoxon with Holm-Bonferroni correction, Cohen's dz, matched-pairs
 rank-biserial), and renders per-metric boxplots with per-subject jitter.
 
+LOG FORMAT (post-fix runner): the dwell counter increments while the cursor
+holds inside the target. The runner logs the dwell-completion (firing) frame in
+the trial's OWN block, with hold_count == HOLD_FRAMES and the trial's own target
+coordinates; the target advances on the FOLLOWING frame. Acquisition is flagged
+at hold_count >= HOLD_FRAMES. This differs from the pre-fix pilot runner, which
+logged the firing frame after the target had already switched (it landed as the
+first row of the next block). A guard in segment_trials raises if a pre-fix log
+is passed in, so the two formats are never silently mixed.
+
 Metric definitions follow Scheme and Englehart 2013 (IEEE TNSRE), Wurth and
 Hargrove 2014 (J NeuroEng Rehabil), Eddy et al. 2023 (LibEMG, IEEE Access), and
 Waris et al. 2018 / 2020. Effective throughput follows the ISO 9241-9
-effective-width method (Soukoreff and MacKenzie 2004; We = 4.133 * SDx).
+effective-width method (Soukoreff and MacKenzie 2004).
 
 The unit of analysis is the subject. Higher mean with lower across-subject
 spread is treated as the target outcome.
 
 Notation per trial: D = straight-line distance from the start cursor position to
-the target center; W = target width (diameter); t_acq = time of acquisition;
-t_start = time the target appeared; t_end = time of the last logged frame;
-DWELL = required hold time; P = total cursor path length; d_eff = straight-line
-distance from the start cursor to the final cursor position (at acquisition or at
-timeout); ID = log2(D / W + 1).
+the target center; W = target width (diameter); t_acq = time of the
+dwell-completion (firing) frame; t_start = time the target appeared; t_end =
+time of the last logged frame; DWELL = HOLD_FRAMES / FRAME_RATE (the mandatory
+hold); P = total cursor path length; d_eff = straight-line distance from the
+start cursor to the final cursor position (at acquisition or at timeout);
+ID = log2(D / W + 1).
 
 Metrics:
 - completion_rate: percent of targets acquired within the timeout. = 100 * n_success / n_trials. All trials.
-- movement_time (MT): time to acquire, excluding the dwell hold. = t_acq - t_start - DWELL. Success only.
+- movement_time (MT): reaching time from target onset to acquisition, mandatory dwell removed. = t_acq - t_start - DWELL, t_acq at the firing frame (hold_count == HOLD_FRAMES). Success only.
 - movement_time_penalized: MT for successes (dwell removed); full elapsed time for failures. = (t_acq - t_start - DWELL) if success else (t_end - t_start). All trials.
 - throughput_nominal (TP): Shannon throughput, mean of per-trial ID/MT. = mean(ID / MT). Success only.
 - throughput_nominal_penalized: mean of ID / MT_penalized over all trials (failures charged their timeout). All trials.
 - throughput_meanofmeans: per-condition mean ID over mean MT, averaged across conditions. = mean_c( mean(ID)_c / mean(MT)_c ). Success only.
 - throughput_meanofmeans_penalized: same with MT_penalized over all trials. All trials.
-- throughput_effective: ISO effective throughput, mean_c( ID_e / mean(MT)_c ), ID_e = log2(D_e / W_e + 1), W_e = 4.133 * SD of along-axis endpoint deviation. Success only.
-- throughput_effective_penalized: same ID_e but divided by mean MT_penalized over all trials in the condition. All trials in denominator; W_e from successes.
+- throughput_effective: ISO effective throughput, mean_c( IDe_c / mean(MT)_c ), IDe = log2(Ae / We + 1), Ae = mean amplitude in the condition,
+    We = 4.133 * SDx. SDx is the std of selection endpoints projected onto the start->target axis, computed PER CONDITION (the axis and amplitude differ
+    by condition). 4.133 = 2 * 2.0665 brackets the central 96% of a Gaussian endpoint spread, so We is the width that would have yielded a 4% miss rate
+    given the observed precision. Success only.
+- throughput_effective_penalized: same IDe but divided by mean MT_penalized over all trials in the condition. All trials in denominator; We from successes.
 - path_efficiency (PE): directness of the trajectory, start to final position. = 100 * d_eff / P, capped at 100. All trials.
 - direction_change_ratio: cardinal movement segments taken divided by the minimum needed. = N_seg / N_seg_min, N_seg_min = 1 if the target is on a cardinal axis from the start else 2. Optimal = 1.0. All trials.
 - overshoots: count of target-boundary exits after first entry (enter-then-leave episodes). Success only.
@@ -65,35 +78,42 @@ except Exception:
 
 warnings.filterwarnings("ignore")
 
-from utils import PARAMS
-
 
 # ======== CONFIG ========
 
 FITTS_ROOT = "fitts_logs"
 OUT_DIR = "fitts_results"
 
-# Task parameters, must match the run that produced the logs.
-FRAME_RATE = PARAMS['frame_rate']
-HOLD_FRAMES = PARAMS['hold_frames_required']
-TIMEOUT_FRAMES = PARAMS['target_timeout_frames']
-SCREEN_SIZE = PARAMS['screen_size']
-RING_RADII = PARAMS['ring_radius_list']
-TARGET_RADII = PARAMS['target_radius_list']
+# Task parameters must match the run that produced the logs. Pulled from utils so
+# the analysis stays locked to the runner config; falls back to literals when the
+# training package is not importable on the analysis machine.
+try:
+    from utils import PARAMS
+    FRAME_RATE = PARAMS['frame_rate']
+    HOLD_FRAMES = PARAMS['hold_frames_required']
+    TIMEOUT_FRAMES = PARAMS['target_timeout_frames']
+    SCREEN_SIZE = PARAMS['screen_size']
+    RING_RADII = PARAMS['ring_radius_list']
+    TARGET_RADII = PARAMS['target_radius_list']
+except Exception:
+    FRAME_RATE = 60
+    HOLD_FRAMES = 30
+    TIMEOUT_FRAMES = 420
+    SCREEN_SIZE = (1690, 980)
+    RING_RADII = [300, 450]
+    TARGET_RADII = [20, 10]
 
 # Screen center. None infers it per file from the first logged cursor position
 # (the cursor always starts at screen center). Fallback is SCREEN_SIZE / 2.
 SCREEN_CENTER = None
 
-# The task presents 4 conditions x 8 targets = 32 trials per (subject, model).
-# No targets are dropped by default. If the runner switches to a phantom next
-# target on the final acquisition and logs 1-2 artifact frames before the session
-# closes, those are caught by MIN_TRIAL_FRAMES below and silently excluded.
-# Set DROP_FIRST_PER_CONDITION = True to drop the first target of each condition
-# (28 trials, ISO multidirectional convention).
+# The task presents (n_rings x n_widths) conditions x max_targets trials per
+# (subject, model). No targets dropped by default. Set DROP_FIRST_PER_CONDITION
+# to drop the first target of each condition (ISO multidirectional convention).
 DROP_FIRST_MOVE = False
 DROP_FIRST_PER_CONDITION = False
 MIN_TRIAL_FRAMES = 5  # blocks shorter than this are pure acquisition artifacts
+FIX_SORT = True
 
 # Quality metrics that require reaching the target (overshoot, stopping
 # distance, reaction time) and the success-only throughput / MT use acquired
@@ -101,9 +121,9 @@ MIN_TRIAL_FRAMES = 5  # blocks shorter than this are pure acquisition artifacts
 # direction-change ratio use all trials.
 MOVE_STEP_PX = 1.0          # cursor step magnitude that counts as movement onset
 DWELL_TIME = HOLD_FRAMES / FRAME_RATE
-MIN_TRIALS_FOR_WE = 1       # minimum successful trials per condition for We
+MIN_TRIALS_FOR_WE = 3       # min successful trials per condition for a usable We (SDx needs >= 2; 3 keeps it stable)
 DIR_MIN_STEP_PX = 2.0       # per-frame step below this is ignored for direction
-DIR_MERGE_PX = 1.0         # a cardinal segment shorter than this is treated as jitter and merged
+DIR_MERGE_PX = 15.0         # a cardinal segment shorter than this (px) is treated as jitter and merged
 # Minimum valid movement time after dwell subtraction. Anything shorter means
 # the cursor was already inside the target when it appeared (trivial acquisition:
 # no real Fitts movement occurred). These trials count for completion rate but
@@ -147,6 +167,35 @@ PLOT_METRICS = [
     "stopping_distance",
     "reaction_time",
 ]
+
+# Fixed left-to-right model order for every boxplot, independent of metric value,
+# so a model sits in the same x-slot in every panel. Present models not listed
+# here are appended (alphabetically) rather than dropped.
+MODEL_ORDER = [
+    "cross_mhcnn_raw_trp",
+    "cross_mhcnn_raw_rest",
+    "cross_mhcnn_raw_1va",
+    "cross_mhcnn_raw_base",
+    "cross_mhcnn_raw_base-rn",
+    "cross_mhcnn_segmented_base",
+    "within_cnnhcf_raw_base-5",
+    "within_mhcnn_raw_base-ft-1",
+    "within_mhcnn_raw_base-ft-5",
+]
+
+# Short tick labels so the x-axis is not a wall of long log names. Edit freely;
+# any model missing here falls back to its raw log name.
+DISPLAY_NAMES = {
+    "within_mhcnn_raw_base-ft-5": "FT-5",
+    "within_mhcnn_raw_base-ft-1": "FT-1",
+    "within_cnnhcf_raw_base-5":   "Within-5",
+    "cross_mhcnn_segmented_base": "Segmented",
+    "cross_mhcnn_raw_base-rn":    "RunNorm",
+    "cross_mhcnn_raw_base":       "Base",
+    "cross_mhcnn_raw_1va":        "Contrastive",
+    "cross_mhcnn_raw_rest":       "Rest",
+    "cross_mhcnn_raw_trp":        "Triplet",
+}
 
 
 # ======== LOG DISCOVERY AND LOADING ========
@@ -256,12 +305,15 @@ def segment_trials(df, subject, model):
     Split one session into trials and compute per-trial metrics.
 
     A trial is a maximal run of rows sharing the same (target_x, target_y). The
-    dwell counter increments while the cursor holds inside the target; the runner
-    logs the firing frame as hold_count == HOLD_FRAMES on the post-switch artifact
-    row (target already advanced), so a genuine acquisition appears as
-    hold_count == HOLD_FRAMES - 1 on this trial's own rows. Acquisition is flagged
-    exactly on that value; any hold_count >= HOLD_FRAMES is the carried artifact
-    and is treated as 0. No look-ahead to the next block is used (Fixed after Pilot #3).
+    dwell counter increments while the cursor holds inside the target; the
+    post-fix runner logs the dwell-completion (firing) frame in this trial's own
+    block as hold_count == HOLD_FRAMES with the trial's own target, then advances
+    the target on the following frame. Acquisition is flagged at
+    hold_count >= HOLD_FRAMES. No look-ahead to the next block is used.
+
+    A format guard raises if a pre-fix (pilot) log is passed in: there the firing
+    frame landed on the next block (target already advanced), so a block would
+    begin on hold_count >= HOLD_FRAMES.
     """
     cx, cy = _infer_center(df)
 
@@ -272,6 +324,19 @@ def segment_trials(df, subject, model):
     df = df.assign(_block=block_id)
 
     blocks = [g for _, g in df.groupby("_block", sort=True)]
+
+    # Format guard. Post-fix blocks start with the cursor outside (or just
+    # entering) the new target, so hold_count begins at 0 or 1. A block that
+    # begins on hold_count >= HOLD_FRAMES is the carried firing-frame artifact of
+    # the pre-fix runner and must be analysed with the pilot handler.
+    first_holds = np.array([float(g["hold_count"].iloc[0]) for g in blocks])
+    if np.any(first_holds >= HOLD_FRAMES):
+        raise ValueError(
+            "Pre-fix (pilot) log format detected for subject=%s model=%s: a block "
+            "begins on hold_count >= HOLD_FRAMES (carried firing-frame artifact). "
+            "This analysis targets post-fix logs; use the pilot-tagged version for "
+            "pilot data." % (subject, model))
+
     rows = []
 
     # Within-condition running index, to flag the first trial of each
@@ -282,6 +347,9 @@ def segment_trials(df, subject, model):
     for bi, blk in enumerate(blocks):
         blk = blk.reset_index(drop=True)
         n = len(blk)
+        if n < MIN_TRIAL_FRAMES:
+            continue  # pure acquisition artifact, not a real trial
+
         t_x = float(blk["target_x"].iloc[0])
         t_y = float(blk["target_y"].iloc[0])
         radius = float(blk["radius"].iloc[0])
@@ -303,17 +371,10 @@ def segment_trials(df, subject, model):
             is_first_in_cond = False
         prev_cond = condition
 
-        # Outcome via the dwell counter only. A genuine dwell completion is
-        # hold_count == HOLD_FRAMES - 1 (the firing frame at HOLD_FRAMES is logged
-        # on the next block as the post-switch artifact). Treat any hold_count
-        # >= HOLD_FRAMES as 0, then flag acquired exactly on HOLD_FRAMES - 1.
+        # Outcome via the dwell counter. A dwell completion fires at
+        # hold_count == HOLD_FRAMES, logged in this block with the correct target.
         hold_arr = blk["hold_count"].to_numpy().astype(float)
-        # hold_adj = np.where(hold_arr >= HOLD_FRAMES, 0.0, hold_arr)
-        ############################################ FIX FOR PILOT ONLY ################################################################
-        inside_arr = blk["inside"].to_numpy().astype(int)
-        # inside_arr[hold_arr >= HOLD_FRAMES] = 0 
-        ############################################################################################################
-        acq_rows = np.where(hold_arr == HOLD_FRAMES)[0]
+        acq_rows = np.where(hold_arr >= HOLD_FRAMES)[0]
         success = acq_rows.size > 0
         acq_i = int(acq_rows[-1]) if success else (n - 1)
         end_i = acq_i
@@ -326,18 +387,21 @@ def segment_trials(df, subject, model):
 
         t_start = float(blk["time"].iloc[0])
         t_end = float(blk["time"].iloc[-1])
-        # Acquisition time is one frame past the last dwell frame (when the hold
-        # would tick to HOLD_FRAMES and fire). Movement time removes the mandatory
-        # dwell on every acquired target; failures never dwell, so their penalized
-        # time is the full elapsed duration with nothing subtracted.
+        # The firing frame (hold_count == HOLD_FRAMES) is the selection instant.
+        # Adding one frame converts the discrete firing sample to the continuous
+        # fire time, so subtracting the nominal dwell (HOLD_FRAMES / FRAME_RATE)
+        # leaves exactly the onset->reach time. The +1 frame is below the noise
+        # floor (one frame on multi-second MTs) but keeps the dwell cancelling
+        # cleanly. Failures never dwell; their penalized time is the full elapsed
+        # duration with nothing subtracted.
         t_acq = (float(blk["time"].iloc[acq_i]) + 1.0 / FRAME_RATE) if success else np.nan
         mt_raw = (t_acq - t_start - DWELL_TIME) if success else np.nan
         # Trivial acquisition: cursor was already inside the target when it
         # appeared (e.g. it drifted there during a preceding timeout). The hold
-        # counter reaches 29 within one dwell window, giving near-zero or negative
-        # MT after dwell subtraction. Exclude from MT/TP averages so that ID/~0
-        # cannot spike the mean-of-ratios, while keeping success=1 so the trial
-        # still counts toward completion rate.
+        # counter reaches HOLD_FRAMES within one dwell window, giving near-zero or
+        # negative MT after dwell subtraction. Exclude from MT/TP averages so that
+        # ID/~0 cannot spike the mean-of-ratios, while keeping success=1 so the
+        # trial still counts toward completion rate.
         if success and (np.isnan(mt_raw) or mt_raw < MT_MIN_VALID):
             mt = np.nan
         else:
@@ -372,9 +436,6 @@ def segment_trials(df, subject, model):
         # Overshoot count: number of inside 1 -> 0 transitions within the block
         # (each is an enter-then-leave before final acquisition).
         inside = blk["inside"].to_numpy().astype(int)
-        ############################################### FIX FOR PILOT ONLY #############################################################
-        # inside = inside_arr
-        ############################################################################################################
         leaves = int(np.sum((inside[:-1] == 1) & (inside[1:] == 0))) if n > 1 else 0
         overshoots = leaves
 
@@ -444,18 +505,19 @@ def effective_throughput_per_subject_model(trials):
     """
     Per (subject, model): effective throughput using means-of-means over
     conditions. We = 4.133 * SDx, where SDx is the std of selection-endpoint
-    deviations projected onto the task axis. Ae is the mean actual amplitude.
+    deviations projected onto the task axis, computed per condition. Ae is the
+    mean actual amplitude in the condition.
 
     Note: dwell-based selection constrains endpoints to lie inside the target,
     which compresses SDx and inflates effective throughput in absolute terms.
     It remains valid for relative comparison across models under the same dwell.
 
-    Also returns a penalized variant. We and the effective index of difficulty
-    are still derived from successful endpoints (failed trials have no selection
-    endpoint), but the movement-time denominator is taken over all trials in the
-    condition (failed trials at their penalized time), so the metric is dragged
-    down for models that fail often. A subject-model with no usable successful
-    condition gets NaN for both, since effective width is undefined there.
+    Also returns a penalized variant. We and the effective ID are still derived
+    from successful endpoints (failed trials have no selection endpoint), but the
+    movement-time denominator is taken over all trials in the condition (failed
+    trials at their penalized time), so the metric is dragged down for models
+    that fail often. A subject-model with no usable successful condition gets NaN
+    for both, since effective width is undefined there.
     """
     out = []
     ok = trials[trials["success"] == 1].copy()
@@ -546,8 +608,6 @@ def aggregate_per_subject_model(trials):
                        .agg(throughput_meanofmeans_penalized=("tp_cond_pen", "mean"))
                        .reset_index())
 
-    # Path efficiency and the direction-change ratio are single definitions over
-    # all trials (success and failure share the same formula).
     agg_pen = (allt.groupby(["subject", "model"])
                    .agg(throughput_nominal_penalized=("tp_pen_trial", "mean"),
                         movement_time_penalized=("mt_penalized", "mean"),
@@ -789,11 +849,26 @@ def summary_by_model(psm, metrics):
 
 # ======== PLOTS ========
 
-def _order_models(psm, metric):
-    # Sort low to high by the mean, independent of metric direction. The title
-    # states the direction so the good end stays unambiguous.
-    means = psm.groupby("model")[metric].mean()
-    return list(means.sort_values(ascending=True).index)
+def _order_models(psm, metric=None):
+    if not FIX_SORT and metric:
+        means = psm.groupby("model")[metric].mean()
+        return list(means.sort_values(ascending=True).index)
+
+    present = list(psm["model"].unique())
+    ordered = [m for m in MODEL_ORDER if m in present]
+    extra = sorted(m for m in present if m not in MODEL_ORDER)
+    return ordered + extra
+
+
+def _model_color_map(models):
+    # Deterministic color per canonical model, keyed by MODEL_ORDER position so a
+    # model keeps the same color across every panel and every ID level. Models
+    # not in MODEL_ORDER fall after the listed ones.
+    present = set(models)
+    ordered = [m for m in MODEL_ORDER if m in present] + \
+              sorted(m for m in present if m not in MODEL_ORDER)
+    cols = plt.cm.tab10.colors
+    return {m: cols[i % len(cols)] for i, m in enumerate(ordered)}
 
 
 def _fmt_stat(v):
@@ -809,15 +884,14 @@ def plot_metric_box(psm, metric, ax, color_map=None):
         return
     order = _order_models(psm, metric)
     if color_map is None:
-        all_models = sorted(psm["model"].unique())
-        color_map = dict(zip(all_models, plt.cm.tab10.colors))
+        color_map = _model_color_map(psm["model"].unique())
     colors = [color_map.get(model, "gray") for model in order]
     if _HAS_SNS:
         sns.boxplot(data=data, x="model", y=metric, order=order, ax=ax,
                     showfliers=False, width=0.6,
                     whiskerprops=dict(alpha=0.7),
                     medianprops=dict(color="black", linewidth=0.6))
-        # Per-box tab10 fill, kept translucent so the jittered points stay visible.
+        # Per-box fill, kept translucent so the jittered points stay visible.
         for i, patch in enumerate(ax.patches):
             r, g, b = colors[i % len(colors)][:3]
             patch.set_facecolor((r, g, b, 0.45))
@@ -826,7 +900,7 @@ def plot_metric_box(psm, metric, ax, color_map=None):
                       color="black", alpha=0.55, size=4, jitter=0.18)
     else:
         groups = [data[data["model"] == m][metric].to_numpy() for m in order]
-        ax.boxplot(groups, labels=order, showfliers=False)
+        ax.boxplot(groups, labels=[DISPLAY_NAMES.get(m, m) for m in order], showfliers=False)
 
     # Mean and std written above each box, clear of the jittered points.
     grp = data.groupby("model")[metric]
@@ -848,6 +922,9 @@ def plot_metric_box(psm, metric, ax, color_map=None):
     ax.set_title("%s (%s)" % (metric, direction), fontsize=10)
     ax.set_xlabel("")
     ax.set_ylabel("")
+    # Short display labels, fixed order.
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([DISPLAY_NAMES.get(m, m) for m in order])
     ax.tick_params(axis="x", rotation=90, labelsize=7)
     ax.grid(axis="y", alpha=0.25)
 
@@ -857,10 +934,11 @@ def plot_boxgrid(psm, metrics, path):
     n = len(metrics)
     ncol = 4
     nrow = int(math.ceil(n / ncol))
+    cmap = _model_color_map(psm["model"].unique())
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 4.5 * nrow), dpi=400)
     axes = np.atleast_1d(axes).flatten()
     for i, met in enumerate(metrics):
-        plot_metric_box(psm, met, axes[i])
+        plot_metric_box(psm, met, axes[i], color_map=cmap)
     for j in range(n, len(axes)):
         axes[j].set_visible(False)
     fig.suptitle("Online Fitts metrics across models (each point is one subject)",
@@ -871,23 +949,16 @@ def plot_boxgrid(psm, metrics, path):
 
 
 def plot_individual_boxes(psm, metrics, out_dir):
+    cmap = _model_color_map(psm["model"].unique())
     for met in metrics:
         if met not in psm.columns or not psm[met].notna().any():
             continue
         fig, ax = plt.subplots(figsize=(max(6, 1.1 * psm["model"].nunique()), 5), dpi=200)
-        plot_metric_box(psm, met, ax)
+        plot_metric_box(psm, met, ax, color_map=cmap)
         ax.set_ylabel(met)
         fig.tight_layout()
         fig.savefig(join(out_dir, "%s.png" % met), bbox_inches="tight")
         plt.close(fig)
-
-
-def _model_color_map(models):
-    # Same mapping used by plot_metric_box's default: sorted model name -> tab10
-    # color, so a model keeps one color across every plot and every ID panel.
-    ms = sorted(models)
-    cols = plt.cm.tab10.colors
-    return {m: cols[i % len(cols)] for i, m in enumerate(ms)}
 
 
 def plot_metric_by_id_box(psmc, metric, path, color_map=None):
@@ -932,7 +1003,7 @@ def plot_all_by_id(psmc, metrics, out_dir, color_map=None):
 
 
 def plot_regression(cond, reg, path):
-    models = list(cond["model"].unique())
+    models = _order_models(cond)
     ncol = min(4, len(models))
     nrow = int(math.ceil(len(models) / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.0 * ncol, 3.4 * nrow), dpi=200,
@@ -953,10 +1024,10 @@ def plot_regression(cond, reg, path):
             xs = np.linspace(g["id_cond"].min(), g["id_cond"].max(), 50)
             ax.plot(xs, ic + sl * xs, color="C3", linewidth=2)
             ax.set_title("%s\nR2(grand)=%.3f  R2(subj)=%.3f" % (
-                model, rmap.loc[model, "r2_grand"], rmap.loc[model, "r2_persubject_mean"]),
-                fontsize=8)
+                DISPLAY_NAMES.get(model, model), rmap.loc[model, "r2_grand"],
+                rmap.loc[model, "r2_persubject_mean"]), fontsize=8)
         else:
-            ax.set_title(model, fontsize=8)
+            ax.set_title(DISPLAY_NAMES.get(model, model), fontsize=8)
         ax.set_xlabel("ID (bits)", fontsize=8)
         ax.set_ylabel("MT (s)", fontsize=8)
         ax.grid(alpha=0.25)
