@@ -21,7 +21,7 @@ pop_mean = np.array([-0.70885944, -0.74997824, -0.47742087, -0.73471236, -0.9906
                     -0.8920331, -0.78142345])
 pop_std = np.array([21.533228, 21.636055, 28.874157, 30.270008, 17.713427, 13.582925, 19.829926,
                     21.28387])
-
+                                                                                    
 dummy_feats = extract_sub(np.ones((10, CH, SEQ)), FEAT_LIST, FEATURE_DIC).transpose(0, 2, 1)
 n_feat_sub = dummy_feats.shape[1]  # F per sub-window
 

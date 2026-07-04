@@ -973,7 +973,7 @@ def plot_metric_by_id_box(psmc, metric, path, color_map=None):
     canon = psmc.groupby("condition")["id_nominal"].mean().sort_values()
     conds = list(canon.index)
     n = len(conds)
-    ncol = 2 if n <= 4 else 3
+    ncol = 2 if not (n % 4) else 3
     nrow = int(math.ceil(n / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 4.6 * nrow), dpi=300,
                              squeeze=False)

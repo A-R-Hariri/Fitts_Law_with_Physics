@@ -380,12 +380,12 @@ class FittsTest(QWidget):
                         self.current_combo_idx += 1
                         self.targets_hit_current_combo = 0
                         # self.ring_index = 0
-                        if self.current_combo_idx >= len(self.combinations): self.close()
+                        if self.current_combo_idx >= len(self.combinations): self.close() # TODO: Move to the end
                         else: _init = True
                     else:
                         _init = True
                 else:
-                    if self.targets_hit >= params['max_targets']: self.close()
+                    if self.targets_hit >= params['max_targets']: self.close() # TODO: Move to the end
                     else: _init = True
         elif params['mode'] == "C":
             for i in range(2):
