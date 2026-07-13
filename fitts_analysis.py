@@ -5,9 +5,11 @@ Reads per-subject, per-model ISO 9241-9 (Mode B, circular ring) cursor logs and
 computes the standard online myoelectric control metrics (throughput, path
 efficiency, completion rate, overshoot, reaction time, stopping distance),
 validates the Fitts task via the movement-time vs index-of-difficulty
-regression, runs repeated-measures statistics across models (Friedman, pairwise
-Wilcoxon with Holm-Bonferroni correction, Cohen's dz, matched-pairs
-rank-biserial), and renders per-metric boxplots with per-subject jitter.
+regression, runs two pre-specified within-subject planned contrasts (paired
+Wilcoxon signed-rank: each cross-user variant vs Base, Holm-corrected within
+that family; pooled cross-user vs pooled calibrated) with mean paired
+difference, matched-pairs rank-biserial, and Cohen's d_z, and renders
+per-metric boxplots with per-subject jitter.
 
 LOG FORMAT (post-fix runner): the dwell counter increments while the cursor
 holds inside the target. The runner logs the dwell-completion (firing) frame in
@@ -58,8 +60,7 @@ import os
 import re
 import math
 import warnings
-from os.path import join, isdir, isfile
-from itertools import combinations
+from os.path import join, isdir
 
 import numpy as np
 import pandas as pd
@@ -147,6 +148,8 @@ HIGHER_IS_BETTER = {
     "throughput_meanofmeans_penalized": True,
     "throughput_effective_penalized": True,
     "movement_time_penalized": False,
+    # Composite trajectory-quality index (sign-aligned z-scored average).
+    "quality_composite": True,
 }
 
 # Metrics shown in the headline boxplot grid. Each penalized metric is placed
@@ -166,6 +169,7 @@ PLOT_METRICS = [
     "overshoots",
     "stopping_distance",
     "reaction_time",
+    "quality_composite",
 ]
 
 # Fixed left-to-right model order for every boxplot, independent of metric value,
@@ -733,7 +737,40 @@ def fitts_regression(cond):
     return pd.DataFrame(rows)
 
 
-# ======== STATISTICS ========
+# ======== STATISTICS: PRE-SPECIFIED PLANNED CONTRASTS ========
+#
+# The unit of analysis is the subject (standard for this literature). Every
+# contrast is within-subject: a paired Wilcoxon signed-rank on the 14 per-subject
+# differences, each subject serving as their own control. No omnibus, no
+# all-pairs matrix, no trial-level model.
+#
+#   Family A (intervention efficacy): each single-factor cross-user model vs the
+#       Base reference. 5 tests, Holm-corrected within the family.
+#   Family B (paradigm): pooled cross-user mean vs pooled calibrated mean, per
+#       subject. One test, reported as-is.
+#
+# Confirmatory metrics are completion_rate (reliability) and quality_composite
+# (trajectory smoothness). Every other metric is estimation only (summary_by_model,
+# boxplots), no test attached.
+#
+# Effect size is Cohen's d_z, not Cohen's d: d_z standardizes the mean paired
+# difference by the SD of the differences, the correct denominator for a
+# repeated-measures design. Plain d assumes two independent samples and would
+# use a pooled between-group SD, which does not apply when both arms are the
+# same 14 subjects.
+
+BASE_MODEL = "cross_mhcnn_raw_base"
+PLANNED_CONTRAST_METRICS = [
+    "completion_rate",
+    "quality_composite",
+    "movement_time",
+    "movement_time_penalized",
+    "throughput_effective",
+    "throughput_nominal_penalized",
+]
+QUALITY_COMPONENTS = ("path_efficiency", "direction_change_ratio",
+                      "overshoots", "stopping_distance")
+
 
 def _holm_bonferroni(pvals):
     pvals = np.asarray(pvals, dtype=float)
@@ -768,53 +805,113 @@ def _rank_biserial(a, b):
     return float((r_pos - r_neg) / total) if total > 0 else np.nan
 
 
-def stats_for_metric(psm, metric):
-    """Friedman omnibus and Holm-corrected pairwise Wilcoxon for one metric."""
-    wide = psm.pivot_table(index="subject", columns="model", values=metric)
-    models = list(wide.columns)
+def _model_group(name):
+    if name.startswith("within_"):
+        return "calibrated"
+    if name.startswith("cross_"):
+        return "cross"
+    return "other"
 
-    complete = wide.dropna(axis=0, how="any")
-    friedman = {"metric": metric, "n_complete_subjects": int(len(complete)),
-                "n_models": len(models), "chi2": np.nan, "p": np.nan,
-                "kendall_w": np.nan}
-    if len(complete) >= 2 and len(models) >= 3:
+
+def _paired_contrast(wide, a, b, metric, label, family):
+    """One within-subject paired contrast, model a against reference b."""
+    sub = wide[[a, b]].dropna(axis=0, how="any")
+    va, vb = sub[a].to_numpy(), sub[b].to_numpy()
+    diff = va - vb
+    n = len(sub)
+    if n < 2 or np.all(diff == 0):
+        W, p = np.nan, np.nan
+    else:
         try:
-            chi2, p = stats.friedmanchisquare(*[complete[m].to_numpy() for m in models])
-            friedman.update(chi2=float(chi2), p=float(p),
-                            kendall_w=float(chi2 / (len(complete) * (len(models) - 1))))
+            W, p = stats.wilcoxon(va, vb, zero_method="wilcox",
+                                  correction=False, mode="auto")
         except Exception:
-            pass
+            W, p = np.nan, np.nan
+    return {
+        "family": family, "metric": metric, "contrast": label,
+        "model": a, "reference": b, "n_pairs": int(n),
+        "mean_model": float(np.mean(va)) if n else np.nan,
+        "mean_reference": float(np.mean(vb)) if n else np.nan,
+        "mean_diff": float(np.mean(diff)) if n else np.nan,
+        "wilcoxon_W": float(W) if not np.isnan(W) else np.nan,
+        "p_raw": float(p) if not np.isnan(p) else np.nan,
+        "rank_biserial": _rank_biserial(va, vb),
+        "cohens_dz": _cohens_dz(diff),
+    }
 
-    pairs = []
-    raw_p = []
-    for a, b in combinations(models, 2):
-        sub = wide[[a, b]].dropna(axis=0, how="any")
-        if len(sub) < 2:
+
+def _apply_holm(rows):
+    """Fill p_holm and significance in place, Holm-corrected within the list."""
+    ps = np.array([r["p_raw"] for r in rows], dtype=float)
+    mask = ~np.isnan(ps)
+    adj = np.full(len(rows), np.nan)
+    if mask.any():
+        adj[mask] = _holm_bonferroni(ps[mask])
+    for r, a in zip(rows, adj):
+        r["p_holm"] = float(a) if not np.isnan(a) else np.nan
+        r["significant_0.05"] = bool(a < 0.05) if not np.isnan(a) else False
+
+
+def add_quality_composite(psm, components=QUALITY_COMPONENTS):
+    """Add a sign-aligned, z-scored average of the trajectory-quality metrics.
+
+    Each component is z-scored across all (subject, model) cells and flipped so
+    that higher is better, then averaged into one index; higher quality_composite
+    means smoother, more precise control.
+    """
+    psm = psm.copy()
+    z_cols = []
+    for c in components:
+        if c not in psm.columns:
             continue
-        va, vb = sub[a].to_numpy(), sub[b].to_numpy()
-        diff = va - vb
-        try:
-            w, p = stats.wilcoxon(va, vb, zero_method="wilcox", correction=False,
-                                  mode="auto")
-        except Exception:
-            w, p = np.nan, np.nan
-        pairs.append({
-            "metric": metric, "model_a": a, "model_b": b, "n_pairs": int(len(sub)),
-            "median_a": float(np.median(va)), "median_b": float(np.median(vb)),
-            "mean_diff_a_minus_b": float(np.mean(diff)),
-            "wilcoxon_W": float(w) if not np.isnan(w) else np.nan,
-            "p_raw": float(p) if not np.isnan(p) else np.nan,
-            "cohens_dz": _cohens_dz(diff),
-            "rank_biserial": _rank_biserial(va, vb),
-        })
-        raw_p.append(p)
+        v = psm[c].astype(float)
+        sd = v.std(ddof=0)
+        z = (v - v.mean()) / sd if sd > 1e-12 else v * 0.0
+        if not HIGHER_IS_BETTER.get(c, True):
+            z = -z
+        zc = "_z_" + c
+        psm[zc] = z
+        z_cols.append(zc)
+    psm["quality_composite"] = psm[z_cols].mean(axis=1) if z_cols else np.nan
+    psm.drop(columns=z_cols, inplace=True)
+    return psm
 
-    pairs_df = pd.DataFrame(pairs)
-    if len(pairs_df):
-        valid = pairs_df["p_raw"].notna()
-        pairs_df.loc[valid, "p_holm"] = _holm_bonferroni(pairs_df.loc[valid, "p_raw"].to_numpy())
-        pairs_df["significant_holm_0.05"] = pairs_df["p_holm"] < 0.05
-    return friedman, pairs_df
+
+def planned_contrasts(psm, metric):
+    """Family A (5 variants vs Base, Holm-corrected) and Family B (pooled
+    cross-user vs pooled calibrated) for one confirmatory metric."""
+    wide = psm.pivot_table(index="subject", columns="model", values=metric)
+    present = set(wide.columns)
+    rows = []
+
+    # ---- Family A: single-factor cross-user models vs Base ----
+    if BASE_MODEL in present:
+        ordered = [m for m in MODEL_ORDER if m in present]
+        extra = sorted(m for m in present if m not in MODEL_ORDER)
+        famA = []
+        for m in ordered + extra:
+            if m == BASE_MODEL or _model_group(m) != "cross":
+                continue
+            famA.append(_paired_contrast(
+                wide, m, BASE_MODEL, metric,
+                "%s vs Base" % DISPLAY_NAMES.get(m, m), "A_intervention_vs_base"))
+        _apply_holm(famA)
+        rows.extend(famA)
+
+    # ---- Family B: pooled cross-user vs pooled calibrated, per subject ----
+    cross = sorted(m for m in present if _model_group(m) == "cross")
+    calib = sorted(m for m in present if _model_group(m) == "calibrated")
+    if cross and calib:
+        pooled = pd.DataFrame({
+            "cross": wide[cross].mean(axis=1),
+            "calibrated": wide[calib].mean(axis=1),
+        }).dropna(axis=0, how="any")
+        famB = [_paired_contrast(pooled, "cross", "calibrated", metric,
+                                 "Cross-user vs Calibrated (pooled)", "B_paradigm")]
+        _apply_holm(famB)
+        rows.extend(famB)
+
+    return pd.DataFrame(rows)
 
 
 # ======== SUMMARY ========
@@ -1065,6 +1162,7 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
     trials.to_csv(join(out_dir, "trials_long.csv"), index=False)
 
     psm, cond = aggregate_per_subject_model(trials)
+    psm = add_quality_composite(psm)
     psm.to_csv(join(out_dir, "per_subject_model.csv"), index=False)
     cond.to_csv(join(out_dir, "per_subject_model_condition.csv"), index=False)
 
@@ -1078,17 +1176,12 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
     summ = summary_by_model(psm, metrics_present)
     summ.to_csv(join(out_dir, "summary_by_model.csv"), index=False)
 
-    friedman_rows = []
-    all_pairs = []
-    for met in metrics_present:
-        fr, pairs = stats_for_metric(psm, met)
-        friedman_rows.append(fr)
-        if len(pairs):
-            all_pairs.append(pairs)
-    pd.DataFrame(friedman_rows).to_csv(join(out_dir, "friedman_omnibus.csv"), index=False)
-    if all_pairs:
-        pd.concat(all_pairs, ignore_index=True).to_csv(
-            join(out_dir, "pairwise_wilcoxon.csv"), index=False)
+    # Pre-specified within-subject planned contrasts (Family A + B only), one
+    # CSV per metric. No omnibus, no all-pairs matrix, no trial-level model.
+    for met in PLANNED_CONTRAST_METRICS:
+        if met in psm.columns and psm[met].notna().any():
+            planned_contrasts(psm, met).to_csv(
+                join(out_dir, "contrasts_%s.csv" % met), index=False)
 
     plot_boxgrid(psm, metrics_present, join(out_dir, "metrics_grid.png"))
     plot_individual_boxes(psm, metrics_present, out_dir)
