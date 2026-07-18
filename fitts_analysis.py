@@ -958,14 +958,29 @@ def _order_models(psm, metric=None):
 
 
 def _model_color_map(models):
-    # Deterministic color per canonical model, keyed by MODEL_ORDER position so a
-    # model keeps the same color across every panel and every ID level. Models
-    # not in MODEL_ORDER fall after the listed ones.
+    # Retained for callers that still key off model identity (e.g.
+    # plot_regression). No longer used to color boxes: all boxes now render in
+    # a single neutral color, and per-subject color carries the identity.
     present = set(models)
     ordered = [m for m in MODEL_ORDER if m in present] + \
               sorted(m for m in present if m not in MODEL_ORDER)
     cols = plt.cm.tab10.colors
     return {m: cols[i % len(cols)] for i, m in enumerate(ordered)}
+
+
+# Single neutral fill/edge for every box, regardless of model. Subject identity
+# is carried entirely by the scatter dot color instead.
+BOX_FACE = (0.30, 0.34, 0.42, 0.22)
+BOX_EDGE = (0.30, 0.34, 0.42, 0.75)
+
+
+def _subject_color_map(subjects):
+    # Deterministic color per subject from tab20, keyed by sorted subject id so
+    # a given subject keeps the same dot color across every box, every panel,
+    # and every metric figure. tab20 covers up to 20 distinct subjects.
+    present = sorted(set(subjects), key=str)
+    cols = plt.cm.tab20.colors
+    return {s: cols[i % len(cols)] for i, s in enumerate(present)}
 
 
 def _fmt_stat(v):
@@ -974,27 +989,34 @@ def _fmt_stat(v):
     return ("%.1f" % v) if abs(v) >= 10 else ("%.2f" % v)
 
 
-def plot_metric_box(psm, metric, ax, color_map=None):
-    data = psm[["model", metric]].dropna()
+def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0):
+    data = psm[["model", "subject", metric]].dropna()
     if data.empty:
         ax.set_visible(False)
         return
     order = _order_models(psm, metric)
-    if color_map is None:
-        color_map = _model_color_map(psm["model"].unique())
-    colors = [color_map.get(model, "gray") for model in order]
+    if subject_color_map is None:
+        subject_color_map = _subject_color_map(psm["subject"].unique())
     if _HAS_SNS:
         sns.boxplot(data=data, x="model", y=metric, order=order, ax=ax,
                     showfliers=False, width=0.6,
                     whiskerprops=dict(alpha=0.7),
                     medianprops=dict(color="black", linewidth=0.6))
-        # Per-box fill, kept translucent so the jittered points stay visible.
-        for i, patch in enumerate(ax.patches):
-            r, g, b = colors[i % len(colors)][:3]
-            patch.set_facecolor((r, g, b, 0.45))
-            patch.set_edgecolor((r, g, b, 0.9))
-        sns.stripplot(data=data, x="model", y=metric, order=order, ax=ax,
-                      color="black", alpha=0.55, size=4, jitter=0.18)
+        # Every box gets the same neutral fill; subject identity moves to the dots.
+        for patch in ax.patches:
+            patch.set_facecolor(BOX_FACE)
+            patch.set_edgecolor(BOX_EDGE)
+        # Manual jittered scatter, colored per subject, deterministic jitter so
+        # repeated calls for the same metric/model line up across figures.
+        rng = np.random.default_rng(jitter_seed)
+        for i, m in enumerate(order):
+            sub = data[data["model"] == m]
+            if sub.empty:
+                continue
+            xj = i + rng.uniform(-0.18, 0.18, size=len(sub))
+            colors = [subject_color_map.get(s, "black") for s in sub["subject"]]
+            ax.scatter(xj, sub[metric], color=colors, s=34, alpha=0.9,
+                      marker="D", edgecolor="white", linewidth=0.4, zorder=3)
     else:
         groups = [data[data["model"] == m][metric].to_numpy() for m in order]
         ax.boxplot(groups, labels=[DISPLAY_NAMES.get(m, m) for m in order], showfliers=False)
@@ -1026,47 +1048,63 @@ def plot_metric_box(psm, metric, ax, color_map=None):
     ax.grid(axis="y", alpha=0.25)
 
 
+def _add_subject_legend(fig, subject_color_map, ncol=None):
+    # Shared legend mapping subject id to its dot color, placed below the figure
+    # so it doesn't collide with per-panel mean/std annotations.
+    subs = list(subject_color_map.keys())
+    handles = [plt.Line2D([0], [0], marker="D", linestyle="", markersize=6,
+                          markerfacecolor=subject_color_map[s], markeredgecolor="white",
+                          markeredgewidth=0.3, label=str(s)) for s in subs]
+    ncol = ncol or min(10, len(subs))
+    fig.legend(handles=handles, title="subject", loc="lower center",
+              bbox_to_anchor=(0.5, -0.02), ncol=ncol, fontsize=7, title_fontsize=8,
+              frameon=False)
+
+
 def plot_boxgrid(psm, metrics, path):
     metrics = [m for m in metrics if m in psm.columns and psm[m].notna().any()]
     n = len(metrics)
     ncol = 4
     nrow = int(math.ceil(n / ncol))
-    cmap = _model_color_map(psm["model"].unique())
+    smap = _subject_color_map(psm["subject"].unique())
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 4.5 * nrow), dpi=400)
     axes = np.atleast_1d(axes).flatten()
     for i, met in enumerate(metrics):
-        plot_metric_box(psm, met, axes[i], color_map=cmap)
+        plot_metric_box(psm, met, axes[i], subject_color_map=smap)
     for j in range(n, len(axes)):
         axes[j].set_visible(False)
     fig.suptitle("Online Fitts metrics across models (each point is one subject)",
                  fontsize=13, y=1.005)
+    # _add_subject_legend(fig, smap)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_individual_boxes(psm, metrics, out_dir):
-    cmap = _model_color_map(psm["model"].unique())
+    smap = _subject_color_map(psm["subject"].unique())
     for met in metrics:
         if met not in psm.columns or not psm[met].notna().any():
             continue
         fig, ax = plt.subplots(figsize=(max(6, 1.1 * psm["model"].nunique()), 5), dpi=200)
-        plot_metric_box(psm, met, ax, color_map=cmap)
+        plot_metric_box(psm, met, ax, subject_color_map=smap)
         ax.set_ylabel(met)
+        # _add_subject_legend(fig, smap)
         fig.tight_layout()
         fig.savefig(join(out_dir, "%s.png" % met), bbox_inches="tight")
         plt.close(fig)
 
 
-def plot_metric_by_id_box(psmc, metric, path, color_map=None):
+def plot_metric_by_id_box(psmc, metric, path, subject_color_map=None):
     # One figure per metric, one boxplot subplot per ID level (same box style as
     # the headline plots). Each panel shows the across-subject distribution per
-    # model at that single ID. A fixed color map keeps a model's color identical
-    # across panels even when a sparse metric drops a model in some panel.
+    # model at that single ID. A fixed subject color map keeps a subject's dot
+    # color identical across panels even when a sparse metric drops a model in
+    # some panel.
     if metric not in psmc.columns or not psmc[metric].notna().any():
         return
-    if color_map is None:
-        color_map = _model_color_map(psmc["model"].unique())
+    if subject_color_map is None:
+        subject_color_map = _subject_color_map(psmc["subject"].unique())
     canon = psmc.groupby("condition")["id_nominal"].mean().sort_values()
     conds = list(canon.index)
     n = len(conds)
@@ -1077,26 +1115,27 @@ def plot_metric_by_id_box(psmc, metric, path, color_map=None):
     axes = axes.flatten()
     direction = "higher better" if HIGHER_IS_BETTER.get(metric, True) else "lower better"
     for i, c in enumerate(conds):
-        sub = psmc[psmc["condition"] == c][["model", metric]].dropna()
-        plot_metric_box(sub, metric, axes[i], color_map=color_map)
+        sub = psmc[psmc["condition"] == c][["model", "subject", metric]].dropna()
+        plot_metric_box(sub, metric, axes[i], subject_color_map=subject_color_map)
         axes[i].set_title("ID=%.2f  (%s)" % (float(canon[c]), c), fontsize=9)
         axes[i].set_ylabel(metric, fontsize=8)
     for j in range(n, len(axes)):
         axes[j].set_visible(False)
     fig.suptitle("%s by ID (%s) -- each point is one subject" % (metric, direction),
                  fontsize=13, y=1.005)
+    _add_subject_legend(fig, subject_color_map)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_all_by_id(psmc, metrics, out_dir, color_map=None):
-    if color_map is None:
-        color_map = _model_color_map(psmc["model"].unique())
+def plot_all_by_id(psmc, metrics, out_dir, subject_color_map=None):
+    if subject_color_map is None:
+        subject_color_map = _subject_color_map(psmc["subject"].unique())
     for met in metrics:
         if met not in psmc.columns or not psmc[met].notna().any():
             continue
-        plot_metric_by_id_box(psmc, met, join(out_dir, "%s_by_id.png" % met), color_map)
+        plot_metric_by_id_box(psmc, met, join(out_dir, "%s_by_id.png" % met), subject_color_map)
 
 
 def plot_regression(cond, reg, path):
@@ -1187,8 +1226,8 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
     plot_individual_boxes(psm, metrics_present, out_dir)
 
     byid_metrics = [m for m in PLOT_METRICS if m in psmc.columns and psmc[m].notna().any()]
-    cmap = _model_color_map(psm["model"].unique())
-    plot_all_by_id(psmc, byid_metrics, out_dir, cmap)
+    smap = _subject_color_map(psm["subject"].unique())
+    plot_all_by_id(psmc, byid_metrics, out_dir, smap)
     if len(cond):
         plot_regression(cond, reg, join(out_dir, "fitts_regression.png"))
 
