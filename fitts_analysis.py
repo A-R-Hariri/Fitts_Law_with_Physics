@@ -114,7 +114,7 @@ SCREEN_CENTER = None
 DROP_FIRST_MOVE = False
 DROP_FIRST_PER_CONDITION = False
 MIN_TRIAL_FRAMES = 5  # blocks shorter than this are pure acquisition artifacts
-FIX_SORT = True
+FIX_SORT = False
 
 # Quality metrics that require reaching the target (overshoot, stopping
 # distance, reaction time) and the success-only throughput / MT use acquired
@@ -196,8 +196,8 @@ DISPLAY_NAMES = {
     "cross_mhcnn_segmented_base": "Segmented",
     "cross_mhcnn_raw_base-rn":    "RunNorm",
     "cross_mhcnn_raw_base":       "Base",
-    "cross_mhcnn_raw_1va":        "Contrastive",
-    "cross_mhcnn_raw_rest":       "Rest",
+    "cross_mhcnn_raw_1va":        "Proto",
+    "cross_mhcnn_raw_rest":       "RestLoss",
     "cross_mhcnn_raw_trp":        "Triplet",
 }
 
@@ -250,6 +250,15 @@ def load_log(filepath):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["frame", "cursor_x", "cursor_y", "target_x", "target_y"])
     df = df.sort_values("frame").reset_index(drop=True)
+    if len(df) >= 2:
+        last_row = df.iloc[-1]
+        if last_row["hold_count"] == HOLD_FRAMES - 1:
+            delta_time = df.iloc[-1]["time"] - df.iloc[-2]["time"]
+            new_row = last_row.copy()
+            new_row["frame"] += 1
+            new_row["time"] += delta_time
+            new_row["hold_count"] = HOLD_FRAMES
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     return df
 
 
@@ -989,7 +998,7 @@ def _fmt_stat(v):
     return ("%.1f" % v) if abs(v) >= 10 else ("%.2f" % v)
 
 
-def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0):
+def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0, stats_font=14):
     data = psm[["model", "subject", metric]].dropna()
     if data.empty:
         ax.set_visible(False)
@@ -1031,20 +1040,22 @@ def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0):
     for i, m in enumerate(order):
         col_max = float(data[data["model"] == m][metric].max())
         sd = stds[m] if (m in stds.index and np.isfinite(stds[m])) else 0.0
-        ax.text(i, col_max + 0.03 * vr,
-                "mean %s\nstd %s" % (_fmt_stat(means[m]), _fmt_stat(sd)),
-                ha="center", va="bottom", fontsize=6.5, color="black",
-                linespacing=0.95)
+        if stats_font:
+            ax.text(i, col_max + 0.03 * vr,
+                    "μ: %s\nσ: %s" % (_fmt_stat(means[m]), _fmt_stat(sd)),
+                    ha="center", va="bottom", fontsize=stats_font, color="black",
+                    rotation=30, rotation_mode="anchor", linespacing=0.95)
     ax.set_ylim(vmin - 0.05 * vr, vmax + 0.22 * vr)
 
     direction = "higher better" if HIGHER_IS_BETTER.get(metric, True) else "lower better"
-    ax.set_title("%s (%s)" % (metric, direction), fontsize=10)
+    # ax.set_title("%s (%s)" % (metric, direction), fontsize=10)
     ax.set_xlabel("")
     ax.set_ylabel("")
     # Short display labels, fixed order.
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels([DISPLAY_NAMES.get(m, m) for m in order])
-    ax.tick_params(axis="x", rotation=90, labelsize=7)
+    ax.tick_params(axis="x", rotation=30, labelsize=18)
+    ax.tick_params(axis="y", labelsize=14)
     ax.grid(axis="y", alpha=0.25)
 
 
@@ -1088,7 +1099,7 @@ def plot_individual_boxes(psm, metrics, out_dir):
             continue
         fig, ax = plt.subplots(figsize=(max(6, 1.1 * psm["model"].nunique()), 5), dpi=200)
         plot_metric_box(psm, met, ax, subject_color_map=smap)
-        ax.set_ylabel(met)
+        # ax.set_ylabel(met)
         # _add_subject_legend(fig, smap)
         fig.tight_layout()
         fig.savefig(join(out_dir, "%s.png" % met), bbox_inches="tight")
@@ -1110,21 +1121,25 @@ def plot_metric_by_id_box(psmc, metric, path, subject_color_map=None):
     n = len(conds)
     ncol = 2 if not (n % 4) else 3
     nrow = int(math.ceil(n / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 4.6 * nrow), dpi=300,
-                             squeeze=False)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(8.0 * ncol, 5 * nrow), dpi=300,
+                             squeeze=True)
     axes = axes.flatten()
     direction = "higher better" if HIGHER_IS_BETTER.get(metric, True) else "lower better"
     for i, c in enumerate(conds):
         sub = psmc[psmc["condition"] == c][["model", "subject", metric]].dropna()
-        plot_metric_box(sub, metric, axes[i], subject_color_map=subject_color_map)
-        axes[i].set_title("ID=%.2f  (%s)" % (float(canon[c]), c), fontsize=9)
-        axes[i].set_ylabel(metric, fontsize=8)
+        plot_metric_box(sub, metric, axes[i], subject_color_map=subject_color_map,
+                        stats_font=0)
+        axes[i].set_title(f"ID={canon[c]:.2f}"
+                          ,fontsize=12)
+        axes[i].tick_params(axis="y", labelleft=False)
+        # axes[i].set_ylabel(metric, fontsize=8)
+    axes[0].tick_params(axis="y", labelleft=False)
     for j in range(n, len(axes)):
         axes[j].set_visible(False)
-    fig.suptitle("%s by ID (%s) -- each point is one subject" % (metric, direction),
-                 fontsize=13, y=1.005)
-    _add_subject_legend(fig, subject_color_map)
-    fig.tight_layout()
+    # fig.suptitle("%s by ID (%s) -- each point is one subject" % (metric, direction),
+    #              fontsize=13, y=1.005)
+    # _add_subject_legend(fig, subject_color_map)
+    fig.tight_layout(pad=0.5)
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
