@@ -71,6 +71,9 @@ except Exception:
     RING_RADII = [300, 450]
     TARGET_RADII = [20, 10]
 
+# use it if data was collected using old versions
+LAST_FRAME_DROPPED = True
+
 SCREEN_CENTER = None
 
 DROP_FIRST_MOVE = False
@@ -202,16 +205,17 @@ def load_log(filepath):
     df = df.dropna(subset=["frame", "cursor_x", "cursor_y", "target_x", "target_y"])
     df = df.sort_values("frame").reset_index(drop=True)
 
-    # # patch for last successfl frame bug for older versions.
-    # if len(df) >= 2:
-    #     last_row = df.iloc[-1]
-    #     if last_row["hold_count"] == HOLD_FRAMES - 1:
-    #         delta_time = df.iloc[-1]["time"] - df.iloc[-2]["time"]
-    #         new_row = last_row.copy()
-    #         new_row["frame"] += 1
-    #         new_row["time"] += delta_time
-    #         new_row["hold_count"] = HOLD_FRAMES
-    #         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    # patch for last successfl frame bug for older versions.
+    if LAST_FRAME_DROPPED:
+        if len(df) >= 2:
+            last_row = df.iloc[-1]
+            if last_row["hold_count"] == HOLD_FRAMES - 1:
+                delta_time = df.iloc[-1]["time"] - df.iloc[-2]["time"]
+                new_row = last_row.copy()
+                new_row["frame"] += 1
+                new_row["time"] += delta_time
+                new_row["hold_count"] = HOLD_FRAMES
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
     return df
 
