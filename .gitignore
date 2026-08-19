@@ -26,3 +26,5 @@ fitts_analysis*.py
 fitts_logs*
 *.txt
 /main_study
+*.rar
+*.zip
