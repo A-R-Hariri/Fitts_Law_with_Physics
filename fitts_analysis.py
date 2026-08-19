@@ -1,34 +1,5 @@
 """
-Fitts' law analysis for online (real-time) myoelectric model evaluation.
-
-Reads per-subject, per-model ISO 9241-9 (Mode B, circular ring) cursor logs and
-computes the standard online myoelectric control metrics (throughput, path
-efficiency, completion rate, overshoot, reaction time, stopping distance),
-validates the Fitts task via the movement-time vs index-of-difficulty
-regression, runs two pre-specified within-subject planned contrasts (paired
-Wilcoxon signed-rank: each cross-user variant vs Base, Holm-corrected within
-that family; pooled cross-user vs pooled calibrated) with mean paired
-difference, matched-pairs rank-biserial, and Cohen's d_z, and renders
-per-metric boxplots with per-subject jitter.
-
-LOG FORMAT (post-fix runner): the dwell counter increments while the cursor
-holds inside the target. The runner logs the dwell-completion (firing) frame in
-the trial's OWN block, with hold_count == HOLD_FRAMES and the trial's own target
-coordinates; the target advances on the FOLLOWING frame. Acquisition is flagged
-at hold_count >= HOLD_FRAMES. This differs from the pre-fix pilot runner, which
-logged the firing frame after the target had already switched (it landed as the
-first row of the next block). A guard in segment_trials raises if a pre-fix log
-is passed in, so the two formats are never silently mixed.
-
-Metric definitions follow Scheme and Englehart 2013 (IEEE TNSRE), Wurth and
-Hargrove 2014 (J NeuroEng Rehabil), Eddy et al. 2023 (LibEMG, IEEE Access), and
-Waris et al. 2018 / 2020. Effective throughput follows the ISO 9241-9
-effective-width method (Soukoreff and MacKenzie 2004).
-
-The unit of analysis is the subject. Higher mean with lower across-subject
-spread is treated as the target outcome.
-
-Notation per trial: D = straight-line distance from the start cursor position to
+D = straight-line distance from the start cursor position to
 the target center; W = target width (diameter); t_acq = time of the
 dwell-completion (firing) frame; t_start = time the target appeared; t_end =
 time of the last logged frame; DWELL = HOLD_FRAMES / FRAME_RATE (the mandatory
@@ -84,10 +55,6 @@ warnings.filterwarnings("ignore")
 
 FITTS_ROOT = "fitts_logs"
 OUT_DIR = "fitts_results"
-
-# Task parameters must match the run that produced the logs. Pulled from utils so
-# the analysis stays locked to the runner config; falls back to literals when the
-# training package is not importable on the analysis machine.
 try:
     from utils import PARAMS
     FRAME_RATE = PARAMS['frame_rate']
@@ -104,13 +71,8 @@ except Exception:
     RING_RADII = [300, 450]
     TARGET_RADII = [20, 10]
 
-# Screen center. None infers it per file from the first logged cursor position
-# (the cursor always starts at screen center). Fallback is SCREEN_SIZE / 2.
 SCREEN_CENTER = None
 
-# The task presents (n_rings x n_widths) conditions x max_targets trials per
-# (subject, model). No targets dropped by default. Set DROP_FIRST_PER_CONDITION
-# to drop the first target of each condition (ISO multidirectional convention).
 DROP_FIRST_MOVE = False
 DROP_FIRST_PER_CONDITION = False
 MIN_TRIAL_FRAMES = 5  # blocks shorter than this are pure acquisition artifacts
@@ -131,7 +93,6 @@ DIR_MERGE_PX = 15.0         # a cardinal segment shorter than this (px) is treat
 # are excluded from MT and throughput averages to prevent ID/~0 TP spikes.
 MT_MIN_VALID = 2.0 / FRAME_RATE   # 2 frames
 
-# Direction of improvement, used only for sorting and reporting.
 HIGHER_IS_BETTER = {
     "throughput_nominal": True,
     "throughput_meanofmeans": True,
@@ -143,7 +104,6 @@ HIGHER_IS_BETTER = {
     "overshoots": False,
     "stopping_distance": False,
     "direction_change_ratio": False,
-    # Penalized variants (failed trials folded in).
     "throughput_nominal_penalized": True,
     "throughput_meanofmeans_penalized": True,
     "throughput_effective_penalized": True,
@@ -152,8 +112,6 @@ HIGHER_IS_BETTER = {
     "quality_composite": True,
 }
 
-# Metrics shown in the headline boxplot grid. Each penalized metric is placed
-# next to its success-only counterpart.
 PLOT_METRICS = [
     "throughput_nominal",
     "throughput_nominal_penalized",
@@ -172,9 +130,6 @@ PLOT_METRICS = [
     "quality_composite",
 ]
 
-# Fixed left-to-right model order for every boxplot, independent of metric value,
-# so a model sits in the same x-slot in every panel. Present models not listed
-# here are appended (alphabetically) rather than dropped.
 MODEL_ORDER = [
     "cross_mhcnn_raw_trp",
     "cross_mhcnn_raw_rest",
@@ -187,8 +142,6 @@ MODEL_ORDER = [
     "within_mhcnn_raw_base-ft-5",
 ]
 
-# Short tick labels so the x-axis is not a wall of long log names. Edit freely;
-# any model missing here falls back to its raw log name.
 DISPLAY_NAMES = {
     "within_mhcnn_raw_base-ft-5": "FT-5",
     "within_mhcnn_raw_base-ft-1": "FT-1",
@@ -219,7 +172,6 @@ def _is_test_name(name):
 
 
 def discover_logs(root):
-    """Return list of (subject_id, model_name, filepath) tuples."""
     found = []
     if not isdir(root):
         raise FileNotFoundError("Log root not found: %s" % root)
@@ -242,7 +194,6 @@ def _model_from_filename(fname):
 
 
 def load_log(filepath):
-    """Load one CSV log into a numeric DataFrame, sorted by frame."""
     df = pd.read_csv(filepath)
     df.columns = [c.strip() for c in df.columns]
     for c in NUM_COLS:
@@ -250,15 +201,18 @@ def load_log(filepath):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["frame", "cursor_x", "cursor_y", "target_x", "target_y"])
     df = df.sort_values("frame").reset_index(drop=True)
-    if len(df) >= 2:
-        last_row = df.iloc[-1]
-        if last_row["hold_count"] == HOLD_FRAMES - 1:
-            delta_time = df.iloc[-1]["time"] - df.iloc[-2]["time"]
-            new_row = last_row.copy()
-            new_row["frame"] += 1
-            new_row["time"] += delta_time
-            new_row["hold_count"] = HOLD_FRAMES
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+    # # patch for last successfl frame bug for older versions.
+    # if len(df) >= 2:
+    #     last_row = df.iloc[-1]
+    #     if last_row["hold_count"] == HOLD_FRAMES - 1:
+    #         delta_time = df.iloc[-1]["time"] - df.iloc[-2]["time"]
+    #         new_row = last_row.copy()
+    #         new_row["frame"] += 1
+    #         new_row["time"] += delta_time
+    #         new_row["hold_count"] = HOLD_FRAMES
+    #         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
     return df
 
 
@@ -271,17 +225,6 @@ def _infer_center(df):
 
 
 def _cardinal_segments(cx, cy, min_step=DIR_MIN_STEP_PX, merge_px=DIR_MERGE_PX):
-    """
-    Number of cardinal (Manhattan) movement segments in a cursor trajectory.
-
-    The control maps gestures to up/down/left/right, so each instant of motion is
-    quantized to the dominant cardinal axis and sign. Consecutive frames in the
-    same cardinal direction form one segment; a new segment starts on every
-    direction change. Per-frame steps below min_step are ignored (no motion), and
-    a segment whose total displacement is below merge_px is treated as jitter and
-    removed before counting. Returns the segment count (0 if the cursor never
-    moved). The user-facing "direction change" count equals this segment count.
-    """
     cx = np.asarray(cx, dtype=float)
     cy = np.asarray(cy, dtype=float)
     if cx.size < 2:
@@ -314,20 +257,6 @@ def _cardinal_segments(cx, cy, min_step=DIR_MIN_STEP_PX, merge_px=DIR_MERGE_PX):
 
 
 def segment_trials(df, subject, model):
-    """
-    Split one session into trials and compute per-trial metrics.
-
-    A trial is a maximal run of rows sharing the same (target_x, target_y). The
-    dwell counter increments while the cursor holds inside the target; the
-    post-fix runner logs the dwell-completion (firing) frame in this trial's own
-    block as hold_count == HOLD_FRAMES with the trial's own target, then advances
-    the target on the following frame. Acquisition is flagged at
-    hold_count >= HOLD_FRAMES. No look-ahead to the next block is used.
-
-    A format guard raises if a pre-fix (pilot) log is passed in: there the firing
-    frame landed on the next block (target already advanced), so a block would
-    begin on hold_count >= HOLD_FRAMES.
-    """
     cx, cy = _infer_center(df)
 
     tx = df["target_x"].to_numpy()
@@ -352,8 +281,6 @@ def segment_trials(df, subject, model):
 
     rows = []
 
-    # Within-condition running index, to flag the first trial of each
-    # contiguous condition run.
     prev_cond = None
     cond_run_idx = -1
 
@@ -370,8 +297,6 @@ def segment_trials(df, subject, model):
 
         start = (float(blk["cursor_x"].iloc[0]), float(blk["cursor_y"].iloc[0]))
 
-        # Task distance: start cursor to target center (drives ID). Not called
-        # amplitude here to keep the ID input unambiguous.
         distance = math.hypot(start[0] - t_x, start[1] - t_y)
         ring_raw = math.hypot(t_x - cx, t_y - cy)
         ring = min(RING_RADII, key=lambda r: abs(r - ring_raw)) if RING_RADII else round(ring_raw)
@@ -384,8 +309,6 @@ def segment_trials(df, subject, model):
             is_first_in_cond = False
         prev_cond = condition
 
-        # Outcome via the dwell counter. A dwell completion fires at
-        # hold_count == HOLD_FRAMES, logged in this block with the correct target.
         hold_arr = blk["hold_count"].to_numpy().astype(float)
         acq_rows = np.where(hold_arr >= HOLD_FRAMES)[0]
         success = acq_rows.size > 0
@@ -427,9 +350,6 @@ def segment_trials(df, subject, model):
         dx = np.diff(seg_x)
         dy = np.diff(seg_y)
         path_len = float(np.hypot(dx, dy).sum())
-        # Path efficiency: directness from the start cursor to the final cursor
-        # position, over the whole path. One definition for success and failure.
-        # 100 percent is a perfectly straight path.
         eff_disp = math.hypot(end[0] - start[0], end[1] - start[1])
         pe = (eff_disp / path_len) if path_len > 1e-9 else np.nan
         if pe is not None and not np.isnan(pe):
@@ -515,23 +435,6 @@ def segment_trials(df, subject, model):
 # ======== EFFECTIVE THROUGHPUT (ISO 9241-9) ========
 
 def effective_throughput_per_subject_model(trials):
-    """
-    Per (subject, model): effective throughput using means-of-means over
-    conditions. We = 4.133 * SDx, where SDx is the std of selection-endpoint
-    deviations projected onto the task axis, computed per condition. Ae is the
-    mean actual amplitude in the condition.
-
-    Note: dwell-based selection constrains endpoints to lie inside the target,
-    which compresses SDx and inflates effective throughput in absolute terms.
-    It remains valid for relative comparison across models under the same dwell.
-
-    Also returns a penalized variant. We and the effective ID are still derived
-    from successful endpoints (failed trials have no selection endpoint), but the
-    movement-time denominator is taken over all trials in the condition (failed
-    trials at their penalized time), so the metric is dragged down for models
-    that fail often. A subject-model with no usable successful condition gets NaN
-    for both, since effective width is undefined there.
-    """
     out = []
     ok = trials[trials["success"] == 1].copy()
     for (subj, model), g in ok.groupby(["subject", "model"]):
@@ -578,7 +481,6 @@ def effective_throughput_per_subject_model(trials):
 # ======== AGGREGATION ========
 
 def aggregate_per_subject_model(trials):
-    """Collapse trials to one row per (subject, model)."""
     ok = trials[trials["success"] == 1].copy()
     ok["tp_trial"] = ok["id_nominal"] / ok["movement_time"]
 
@@ -641,11 +543,6 @@ def aggregate_per_subject_model(trials):
 # ======== PER-CONDITION (PER-ID) AGGREGATION ========
 
 def _effective_tp_for_condition(ok_cond, all_cond):
-    """Effective throughput for a single condition. We and the effective ID come
-    from the successful endpoints in that condition; returns (success-only,
-    penalized) where the penalized variant divides the same effective ID by the
-    mean penalized MT over all trials in the condition. NaN if too few successes
-    or degenerate endpoint scatter (effective width is undefined there)."""
     if len(ok_cond) < MIN_TRIALS_FOR_WE:
         return np.nan, np.nan
     axis_dx = ok_cond["target_x"].to_numpy() - ok_cond["start_x"].to_numpy()
@@ -672,10 +569,6 @@ def _effective_tp_for_condition(ok_cond, all_cond):
 
 
 def aggregate_per_subject_model_condition(trials):
-    """One row per (subject, model, condition). Each condition is a single
-    nominal ID level, so this is the per-ID breakdown. Success-only metrics use
-    the successful trials in the condition; penalized and completion use all
-    trials in the condition. Same definitions as the global aggregation."""
     rows = []
     for (subj, model, condition), g in trials.groupby(["subject", "model", "condition"]):
         ok = g[g["success"] == 1]
@@ -712,11 +605,6 @@ def aggregate_per_subject_model_condition(trials):
 # ======== FITTS REGRESSION (VALIDITY CHECK) ========
 
 def fitts_regression(cond):
-    """
-    Per model: grand regression of condition-mean MT on condition-mean ID
-    (one point per condition, averaged across subjects), and the mean of
-    per-subject regression R-squared values.
-    """
     rows = []
     for model, g in cond.groupby("model"):
         grand = g.groupby("condition").agg(id=("id_cond", "mean"),
@@ -747,26 +635,6 @@ def fitts_regression(cond):
 
 
 # ======== STATISTICS: PRE-SPECIFIED PLANNED CONTRASTS ========
-#
-# The unit of analysis is the subject (standard for this literature). Every
-# contrast is within-subject: a paired Wilcoxon signed-rank on the 14 per-subject
-# differences, each subject serving as their own control. No omnibus, no
-# all-pairs matrix, no trial-level model.
-#
-#   Family A (intervention efficacy): each single-factor cross-user model vs the
-#       Base reference. 5 tests, Holm-corrected within the family.
-#   Family B (paradigm): pooled cross-user mean vs pooled calibrated mean, per
-#       subject. One test, reported as-is.
-#
-# Confirmatory metrics are completion_rate (reliability) and quality_composite
-# (trajectory smoothness). Every other metric is estimation only (summary_by_model,
-# boxplots), no test attached.
-#
-# Effect size is Cohen's d_z, not Cohen's d: d_z standardizes the mean paired
-# difference by the SD of the differences, the correct denominator for a
-# repeated-measures design. Plain d assumes two independent samples and would
-# use a pooled between-group SD, which does not apply when both arms are the
-# same 14 subjects.
 
 BASE_MODEL = "cross_mhcnn_raw_base"
 PLANNED_CONTRAST_METRICS = [
@@ -801,7 +669,7 @@ def _cohens_dz(diff):
 
 
 def _rank_biserial(a, b):
-    """Matched-pairs rank-biserial correlation for the Wilcoxon signed-rank."""
+    # Matched-pairs rank-biserial correlation for the Wilcoxon signed-rank.
     d = a - b
     d = d[~np.isnan(d)]
     d = d[d != 0]
@@ -823,7 +691,7 @@ def _model_group(name):
 
 
 def _paired_contrast(wide, a, b, metric, label, family):
-    """One within-subject paired contrast, model a against reference b."""
+    # One within-subject paired contrast, model a against reference b.
     sub = wide[[a, b]].dropna(axis=0, how="any")
     va, vb = sub[a].to_numpy(), sub[b].to_numpy()
     diff = va - vb
@@ -850,7 +718,7 @@ def _paired_contrast(wide, a, b, metric, label, family):
 
 
 def _apply_holm(rows):
-    """Fill p_holm and significance in place, Holm-corrected within the list."""
+    # Fill p_holm and significance in place, Holm-corrected within the list.
     ps = np.array([r["p_raw"] for r in rows], dtype=float)
     mask = ~np.isnan(ps)
     adj = np.full(len(rows), np.nan)
@@ -887,8 +755,8 @@ def add_quality_composite(psm, components=QUALITY_COMPONENTS):
 
 
 def planned_contrasts(psm, metric):
-    """Family A (5 variants vs Base, Holm-corrected) and Family B (pooled
-    cross-user vs pooled calibrated) for one confirmatory metric."""
+    # Family A (5 variants vs Base, Holm-corrected) and Family B (pooled
+    # cross-user vs pooled calibrated)
     wide = psm.pivot_table(index="subject", columns="model", values=metric)
     present = set(wide.columns)
     rows = []
@@ -967,9 +835,6 @@ def _order_models(psm, metric=None):
 
 
 def _model_color_map(models):
-    # Retained for callers that still key off model identity (e.g.
-    # plot_regression). No longer used to color boxes: all boxes now render in
-    # a single neutral color, and per-subject color carries the identity.
     present = set(models)
     ordered = [m for m in MODEL_ORDER if m in present] + \
               sorted(m for m in present if m not in MODEL_ORDER)
@@ -977,16 +842,11 @@ def _model_color_map(models):
     return {m: cols[i % len(cols)] for i, m in enumerate(ordered)}
 
 
-# Single neutral fill/edge for every box, regardless of model. Subject identity
-# is carried entirely by the scatter dot color instead.
 BOX_FACE = (0.30, 0.34, 0.42, 0.22)
 BOX_EDGE = (0.30, 0.34, 0.42, 0.75)
 
 
 def _subject_color_map(subjects):
-    # Deterministic color per subject from tab20, keyed by sorted subject id so
-    # a given subject keeps the same dot color across every box, every panel,
-    # and every metric figure. tab20 covers up to 20 distinct subjects.
     present = sorted(set(subjects), key=str)
     cols = plt.cm.tab20.colors
     return {s: cols[i % len(cols)] for i, s in enumerate(present)}
@@ -1011,7 +871,6 @@ def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0, stat
                     showfliers=False, width=0.6,
                     whiskerprops=dict(alpha=0.7),
                     medianprops=dict(color="black", linewidth=0.6))
-        # Every box gets the same neutral fill; subject identity moves to the dots.
         for patch in ax.patches:
             patch.set_facecolor(BOX_FACE)
             patch.set_edgecolor(BOX_EDGE)
@@ -1030,7 +889,6 @@ def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0, stat
         groups = [data[data["model"] == m][metric].to_numpy() for m in order]
         ax.boxplot(groups, labels=[DISPLAY_NAMES.get(m, m) for m in order], showfliers=False)
 
-    # Mean and std written above each box, clear of the jittered points.
     grp = data.groupby("model")[metric]
     means = grp.mean()
     stds = grp.std(ddof=1)
@@ -1060,8 +918,6 @@ def plot_metric_box(psm, metric, ax, subject_color_map=None, jitter_seed=0, stat
 
 
 def _add_subject_legend(fig, subject_color_map, ncol=None):
-    # Shared legend mapping subject id to its dot color, placed below the figure
-    # so it doesn't collide with per-panel mean/std annotations.
     subs = list(subject_color_map.keys())
     handles = [plt.Line2D([0], [0], marker="D", linestyle="", markersize=6,
                           markerfacecolor=subject_color_map[s], markeredgecolor="white",
@@ -1107,11 +963,6 @@ def plot_individual_boxes(psm, metrics, out_dir):
 
 
 def plot_metric_by_id_box(psmc, metric, path, subject_color_map=None):
-    # One figure per metric, one boxplot subplot per ID level (same box style as
-    # the headline plots). Each panel shows the across-subject distribution per
-    # model at that single ID. A fixed subject color map keeps a subject's dot
-    # color identical across panels even when a sparse metric drops a model in
-    # some panel.
     if metric not in psmc.columns or not psmc[metric].notna().any():
         return
     if subject_color_map is None:
@@ -1230,8 +1081,6 @@ def main(root=FITTS_ROOT, out_dir=OUT_DIR):
     summ = summary_by_model(psm, metrics_present)
     summ.to_csv(join(out_dir, "summary_by_model.csv"), index=False)
 
-    # Pre-specified within-subject planned contrasts (Family A + B only), one
-    # CSV per metric. No omnibus, no all-pairs matrix, no trial-level model.
     for met in PLANNED_CONTRAST_METRICS:
         if met in psm.columns and psm[met].notna().any():
             planned_contrasts(psm, met).to_csv(
