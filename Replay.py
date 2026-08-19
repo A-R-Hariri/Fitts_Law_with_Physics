@@ -19,11 +19,10 @@ from PySide6.QtGui import (
 # ======== SESSION SELECTION ========
 
 USER_ID = "3"
-MODEL = "within_cnnhcf_raw_base-5" 
-# MODEL = "cross_mhcnn_segmented_base"
+# MODEL = "within_cnnhcf_raw_base-5" 
+MODEL = "cross_mhcnn_segmented_base"
 FITTS_ROOT = "fitts_logs"
 
-# Direct path override. When set, USER_ID and MODEL are ignored.
 LOG_PATH = None
 
 # Which session to take when a subject has several logs for the same model.
@@ -35,14 +34,9 @@ SESSION_INDEX = -1
 
 TRACE_ENABLED = True
 
-# 'session' keeps the whole path, 'condition' resets at every new index of
-# difficulty, 'trial' resets at every new target, 'window' keeps only the last
-# TRACE_WINDOW_FRAMES frames.
 TRACE_SCOPE = 'condition'
 TRACE_WINDOW_FRAMES = 240
 
-# In 'trial' and 'condition' scope, everything before the current scope stays
-# on screen as a faint ghost instead of being cleared outright.
 TRACE_KEEP_PAST = False
 
 # 'speed', 'gesture', 'time' or 'none' (single flat colour).
@@ -62,7 +56,6 @@ SHOW_ANNOTATION = True
 
 # ======== DISPLAY CONFIG ========
 
-# Light background for print figures. False reproduces the live task colours.
 PAPER_MODE = True
 
 # Shrinks the replay window when the task resolution exceeds the display.
@@ -76,6 +69,34 @@ LOOP = False
 SHOT_DIR = "replay_shots"
 SHOT_SCALE = 2.0
 
+
+# ======== OVERLAY CONFIG ========
+
+# Sizes below are given in task pixels and are multiplied at draw time by the
+# render scale (window width / SCREEN_SIZE width). That is 0.85 in the live
+# window and SHOT_SCALE in an export, so the overlay keeps the same relative
+# size in both instead of shrinking in the saved figure.
+
+
+COLORBAR_ORIENT = 'vertical'
+COLORBAR_LENGTH_FRAC = 0.62
+COLORBAR_THICKNESS = 46
+COLORBAR_TICKS = 6
+COLORBAR_TITLE_PT = 17
+COLORBAR_FONT_PT = 15
+COLORBAR_MARGIN = 34
+
+# Swatch edge length for the gesture legend.
+GESTURE_SWATCH = 28
+
+ANNOTATION_TITLE_PT = 21
+ANNOTATION_BODY_PT = 16
+ANNOTATION_MARGIN = 18
+
+# Translucent box behind the overlays. Useful over the dark live theme, only
+# clutter on a white paper background.
+OVERLAY_PANEL = False
+
 DISPLAY_NAMES = {
     "within_mhcnn_raw_base-ft-5": "FT-5",
     "within_mhcnn_raw_base-ft-1": "FT-1",
@@ -88,8 +109,6 @@ DISPLAY_NAMES = {
     "cross_mhcnn_raw_trp": "Triplet",
 }
 
-# Probability column index to gesture, following the mapping applied in
-# main.py input_thread: 1 moves down, 4 moves up, 2 and 3 move horizontally.
 GESTURE_NAMES = {0: "NM", 1: "HC", 2: "FX", 3: "EX", 4: "HO"}
 
 
@@ -206,8 +225,6 @@ def _model_from_filename(fname):
 
 
 def find_log(root, user, model, index=-1):
-    """Locate the CSV for one subject and model. Raises with the available
-    tags listed when nothing matches, so a typo is immediately visible."""
     folder = join(root, str(user))
     if not isdir(folder):
         raise FileNotFoundError("No log folder for subject %s at %s" % (user, folder))
@@ -602,75 +619,183 @@ class ReplayView(QWidget):
         p.drawEllipse(QPointF(float(s.cx[i]), float(s.cy[i])), 6.0, 6.0)
         p.setBrush(Qt.NoBrush)
 
+    # -------- overlays --------
+
+    def overlay_scale(self, w):
+        """Multiplier that keeps overlay geometry proportional to the render
+        size: VIEW_SCALE on screen, SHOT_SCALE in an export."""
+        return w / float(SCREEN_SIZE[0])
+
     def draw_colorbar(self, p, w, h):
         if not SHOW_COLORBAR or self.color_by == 'none':
             return
-        margin = 22
-        p.setFont(QFont("Arial", 9))
+        f = self.overlay_scale(w)
+        margin = COLORBAR_MARGIN * f
+        title_pt = max(6, int(round(COLORBAR_TITLE_PT * f)))
+        tick_pt = max(6, int(round(COLORBAR_FONT_PT * f)))
+
         if self.color_by == 'gesture':
-            items = [(GESTURE_NAMES[k], GESTURE_COLORS[k]) for k in sorted(GESTURE_COLORS)]
-            bw, bh, gap = 14, 14, 6
-            box_h = len(items) * (bh + gap) + 10
-            x0 = w - margin - 92
-            y0 = h - margin - box_h
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(self.theme['panel']))
-            p.drawRoundedRect(QRectF(x0 - 8, y0 - 6, 100, box_h + 6), 4, 4)
-            for j, (name, col) in enumerate(items):
-                y = y0 + j * (bh + gap)
-                p.setPen(Qt.NoPen)
-                p.setBrush(QBrush(col))
-                p.drawRect(QRectF(x0, y, bw, bh))
-                p.setPen(QPen(self.theme['text']))
-                p.drawText(QRectF(x0 + bw + 8, y - 2, 60, bh + 4),
-                           Qt.AlignVCenter | Qt.AlignLeft, name)
-            p.setBrush(Qt.NoBrush)
+            self.draw_gesture_legend(p, w, h, f, tick_pt)
             return
 
-        bar_w, bar_h = 190, 12
-        x0 = w - margin - bar_w
-        y0 = h - margin - bar_h - 16
-        grad = QLinearGradient(x0, 0, x0 + bar_w, 0)
-        for k in range(11):
-            grad.setColorAt(k / 10.0, self.lut[int(k / 10.0 * (len(self.lut) - 1))])
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(self.theme['panel']))
-        p.drawRoundedRect(QRectF(x0 - 10, y0 - 20, bar_w + 20, bar_h + 46), 4, 4)
-        p.setBrush(QBrush(grad))
-        p.drawRect(QRectF(x0, y0, bar_w, bar_h))
-        p.setPen(QPen(self.theme['text']))
         if self.color_by == 'speed':
             title = "Cursor speed (px/s)"
-            lo, hi = "0", "%d" % int(round(self.s.vmax))
+            n_ticks = max(2, COLORBAR_TICKS)
+            ticks = []
+            for k in range(n_ticks):
+                frac = k / float(n_ticks - 1)
+                ticks.append((frac, "%d" % int(round(frac * self.s.vmax))))
         else:
             title = "Time in trace"
-            lo, hi = "start", "now"
-        p.drawText(QRectF(x0 - 4, y0 - 20, bar_w + 8, 16), Qt.AlignLeft | Qt.AlignVCenter, title)
-        p.drawText(QRectF(x0 - 4, y0 + bar_h + 2, 60, 14), Qt.AlignLeft | Qt.AlignVCenter, lo)
-        p.drawText(QRectF(x0 + bar_w - 60, y0 + bar_h + 2, 64, 14),
-                   Qt.AlignRight | Qt.AlignVCenter, hi)
+            ticks = [(0.0, "start"), (1.0, "now")]
+
+        p.setFont(QFont("Arial", tick_pt))
+        fm = p.fontMetrics()
+        label_w = max(fm.horizontalAdvance(txt) for _, txt in ticks) + 10 * f
+        tick_len = 9 * f
+        gap = 12 * f
+
+        if COLORBAR_ORIENT == 'vertical':
+            bar_w = COLORBAR_THICKNESS * f
+            bar_h = h * COLORBAR_LENGTH_FRAC
+            x0 = w - margin - label_w - tick_len - gap - bar_w
+            y0 = (h - bar_h) / 2.0
+            grad = QLinearGradient(0.0, y0 + bar_h, 0.0, y0)
+        else:
+            bar_w = w * COLORBAR_LENGTH_FRAC * 0.5
+            bar_h = COLORBAR_THICKNESS * f
+            x0 = w - margin - bar_w
+            y0 = h - margin - bar_h - tick_pt * 2.4
+            grad = QLinearGradient(x0, 0.0, x0 + bar_w, 0.0)
+
+        for k in range(33):
+            grad.setColorAt(k / 32.0, self.lut[int(k / 32.0 * (len(self.lut) - 1))])
+
+        if OVERLAY_PANEL:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(self.theme['panel']))
+            if COLORBAR_ORIENT == 'vertical':
+                p.drawRoundedRect(QRectF(x0 - title_pt * 2.6 - gap, y0 - 18 * f,
+                                         bar_w + tick_len + gap + label_w + title_pt * 2.6 + gap,
+                                         bar_h + 36 * f), 6 * f, 6 * f)
+            else:
+                p.drawRoundedRect(QRectF(x0 - gap, y0 - title_pt * 2.4,
+                                         bar_w + 2 * gap,
+                                         bar_h + title_pt * 2.4 + tick_pt * 2.4), 6 * f, 6 * f)
+            p.setBrush(Qt.NoBrush)
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(grad))
+        p.drawRect(QRectF(x0, y0, bar_w, bar_h))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(self.theme['text'], max(1.0, 1.2 * f)))
+        p.drawRect(QRectF(x0, y0, bar_w, bar_h))
+
+        p.setFont(QFont("Arial", tick_pt))
+        if COLORBAR_ORIENT == 'vertical':
+            for frac, txt in ticks:
+                y = y0 + bar_h * (1.0 - frac)
+                p.drawLine(QPointF(x0 + bar_w, y), QPointF(x0 + bar_w + tick_len, y))
+                p.drawText(QRectF(x0 + bar_w + tick_len + 6 * f, y - tick_pt * 1.2,
+                                  label_w, tick_pt * 2.4),
+                           Qt.AlignLeft | Qt.AlignVCenter, txt)
+            # Axis title rotated to read bottom-to-top alongside the bar.
+            p.save()
+            p.setFont(QFont("Arial", title_pt, QFont.Bold))
+            th = p.fontMetrics().height()
+            p.translate(x0 - gap - th, y0 + bar_h)
+            p.rotate(-90)
+            p.drawText(QRectF(0, 0, bar_h, th), Qt.AlignCenter, title)
+            p.restore()
+        else:
+            for frac, txt in ticks:
+                x = x0 + bar_w * frac
+                p.drawLine(QPointF(x, y0 + bar_h), QPointF(x, y0 + bar_h + tick_len))
+                p.drawText(QRectF(x - label_w / 2.0, y0 + bar_h + tick_len,
+                                  label_w, tick_pt * 2.2),
+                           Qt.AlignHCenter | Qt.AlignVCenter, txt)
+            p.setFont(QFont("Arial", title_pt, QFont.Bold))
+            th = p.fontMetrics().height()
+            p.drawText(QRectF(x0, y0 - th - 4 * f, bar_w, th),
+                       Qt.AlignHCenter | Qt.AlignVCenter, title)
+
+    def draw_gesture_legend(self, p, w, h, f, font_pt):
+        items = [(GESTURE_NAMES[k], GESTURE_COLORS[k]) for k in sorted(GESTURE_COLORS)]
+        sw = GESTURE_SWATCH * f
+        gap = sw * 0.6
+        p.setFont(QFont("Arial", font_pt))
+        label_w = max(p.fontMetrics().horizontalAdvance(name) for name, _ in items) + 12 * f
+        box_h = len(items) * (sw + gap) - gap
+        x0 = w - COLORBAR_MARGIN * f - label_w - sw
+        y0 = (h - box_h) / 2.0
+        if OVERLAY_PANEL:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(self.theme['panel']))
+            p.drawRoundedRect(QRectF(x0 - 12 * f, y0 - 12 * f,
+                                     sw + label_w + 24 * f, box_h + 24 * f), 6 * f, 6 * f)
+            p.setBrush(Qt.NoBrush)
+        for j, (name, col) in enumerate(items):
+            y = y0 + j * (sw + gap)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(col))
+            p.drawRect(QRectF(x0, y, sw, sw))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(self.theme['text']))
+            p.drawText(QRectF(x0 + sw + 10 * f, y, label_w, sw),
+                       Qt.AlignLeft | Qt.AlignVCenter, name)
 
     def draw_annotation(self, p, i, w, h):
         if not SHOW_ANNOTATION:
             return
+        f = self.overlay_scale(w)
         s = self.s
         d, wd, idd = s.condition(i)
         b = int(s.block[i])
         c = int(s.cond[i])
-        line1 = "Subject %s   Model %s" % (self.subject, s.display_model())
-        line2 = "ID %d/%d   D = %d px   W = %d px   ID = %.2f bits" % (
-            c + 1, s.n_conds, int(round(d)), int(round(wd)), idd)
-        line3 = "Trial %d/%d   t = %.1f s" % (b + 1, s.n_blocks, s.t[i])
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(self.theme['panel']))
-        p.drawRoundedRect(QRectF(14, 12, 400, 68), 4, 4)
-        p.setBrush(Qt.NoBrush)
+
+        title_pt = max(7, int(round(ANNOTATION_TITLE_PT * f)))
+        body_pt = max(6, int(round(ANNOTATION_BODY_PT * f)))
+        pad = 14 * f
+        x0 = ANNOTATION_MARGIN * f
+        y0 = ANNOTATION_MARGIN * f
+
+        ftitle = QFont("Arial", title_pt, QFont.Bold)
+        fbody = QFont("Arial", body_pt)
+
+        rows = [
+            (ftitle, "Subject %s" % self.subject),
+            (ftitle, "Model %s" % s.display_model()),
+            (fbody, "Condition %d/%d" % (c + 1, s.n_conds)),
+            (fbody, "D = %d px   W = %d px" % (int(round(d)), int(round(wd)))),
+            (fbody, "ID = %.2f bits" % idd),
+            (fbody, "Trial %d/%d   t = %.1f s" % (b + 1, s.n_blocks, s.t[i])),
+        ]
+
+        box_w = 0.0
+        box_h = 0.0
+        heights = []
+        for font, txt in rows:
+            p.setFont(font)
+            fm = p.fontMetrics()
+            box_w = max(box_w, fm.horizontalAdvance(txt))
+            heights.append(fm.height())
+            box_h += fm.height()
+        box_w += 2 * pad
+        box_h += 2 * pad + 4 * f * (len(rows) - 1)
+
+        if OVERLAY_PANEL:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(self.theme['panel']))
+            p.drawRoundedRect(QRectF(x0, y0, box_w, box_h), 6 * f, 6 * f)
+            p.setBrush(Qt.NoBrush)
+
         p.setPen(QPen(self.theme['text']))
-        p.setFont(QFont("Arial", 11, QFont.Bold))
-        p.drawText(QRectF(24, 16, 380, 20), Qt.AlignLeft | Qt.AlignVCenter, line1)
-        p.setFont(QFont("Arial", 9))
-        p.drawText(QRectF(24, 36, 380, 20), Qt.AlignLeft | Qt.AlignVCenter, line2)
-        p.drawText(QRectF(24, 54, 380, 20), Qt.AlignLeft | Qt.AlignVCenter, line3)
+        y = y0 + pad
+        for (font, txt), rh in zip(rows, heights):
+            p.setFont(font)
+            p.drawText(QRectF(x0 + pad, y, box_w, rh),
+                       Qt.AlignLeft | Qt.AlignVCenter, txt)
+            y += rh + 4 * f
 
     def paintEvent(self, event):
         p = QPainter(self)
