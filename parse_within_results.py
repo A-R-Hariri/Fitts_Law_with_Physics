@@ -1,24 +1,9 @@
-"""
-parse_within_results.py
------------------------
-Reads user_sgt/{1..13}/results.txt and extracts acc + bal_acc for the three
-within-user models, then prints a summary table.
-
-Models parsed:
-  within_mhcnn_raw_base-ft-1
-  within_mhcnn_raw_base-ft-5
-  within_cnnhcf_raw_base-5
-
-Format of each line in results.txt:
-  <model_name>: (tensor(<acc>, ...), <loss>, <bal_acc>, tensor([[...]])
-"""
-
 import os, re
 import numpy as np
 from os.path import join, exists
 
 USER_SGT_ROOT = "user_sgt"
-N_USERS       = 13
+N_USERS       = 16
 
 MODELS = [
     "within_mhcnn_raw_base-ft-1",
@@ -49,7 +34,7 @@ def parse_results(path):
         line = line.strip()
         if not line:
             continue
-        # Find which model this line belongs to
+
         matched_model = None
         for m in MODELS:
             if line.startswith(m + ":"):
@@ -63,7 +48,6 @@ def parse_results(path):
             print(f"  [WARN] could not parse: {line[:80]}")
             continue
 
-        # Groups: (tensor_acc, plain_acc, loss, tensor_bal, plain_bal)
         acc_t, acc_p, _loss, bal_t, bal_p = m.groups()
         acc     = float(acc_t if acc_t is not None else acc_p)
         bal_acc = float(bal_t if bal_t is not None else bal_p)
@@ -73,9 +57,9 @@ def parse_results(path):
 
 
 def main():
-    # Collect per-user results
+
     user_ids = []
-    all_results = {}   # uid -> {model -> (acc, bal_acc)}
+    all_results = {} 
 
     for uid in range(1, N_USERS + 1):
         path = join(USER_SGT_ROOT, str(uid), "results.txt")
