@@ -10,14 +10,6 @@ from utils import *
 
 # -------- Proposed --------
 class MHCNN(nn.Module):
-    """
-    Proposed model: parallel dilated multi-horizon CNN on raw EMG.
-    Three parallel branches (dilation 1, 2, 4) capture activation
-    dynamics at ~40ms, ~80ms, and ~160ms receptive fields simultaneously,
-    covering the full temporal structure available within a 200ms window.
-
-    Input : (B, 8, 40) 
-    """
     def __init__(self, ch: int = CH, emb_dim: int = 128,
                  num_classes: int = CLASSES, dropout: float = DROPOUT):
         super().__init__()
@@ -56,11 +48,6 @@ class MHCNN(nn.Module):
     
 
 class MLP(nn.Module):
-    """
-    Deep MLP on hand-crafted features, single window, no temporal context.
-
-    Input : (B, 8)  RMS per channel
-    """
     def __init__(self, n_features: int = 8, emb_dim: int = 128,
                  num_classes: int = CLASSES, dropout: float = DROPOUT):
         super().__init__()
@@ -90,12 +77,6 @@ class MLP(nn.Module):
 
 # LSTM variants  
 class LSTM(nn.Module):
-    """
-    LSTM over raw EMG timesteps within a single 200ms window.
-    Processes 40 raw timesteps x 8 channels.
-
-    Input : (B, 8, 40) ->  internally transposed to (B, 40, 8)
-    """
     def __init__(self, ch: int = CH, hidden: int = 128, num_layers: int = 3,
                  emb_dim: int = 128, num_classes: int = CLASSES,
                  dropout: float = DROPOUT):
@@ -133,12 +114,8 @@ class LSTM(nn.Module):
 
 class LSTM_HCF(nn.Module):
     """
-    LSTM over sub-windowed RMS features within a single 200ms window.
-    features: fine-grained temporal structure (4 x 50ms RMS steps)
-    rather than a single vector.
-
-    Input : (B, n_sub, 8)  sub-windowed RMS  (pre-computed, see extract_sub_rms)
-            default n_sub=4 → 4 x 50ms steps
+    Input : (B, n_sub, 8)  sub-windowed HCF
+            default n_sub=4 -> 4 x 50ms steps
     """
     def __init__(self, n_features: int = 8, n_sub: int = N_SUB,
                  hidden: int = 128, num_layers: int = 3,
@@ -176,10 +153,6 @@ class LSTM_HCF(nn.Module):
 
 class CNN(nn.Module):
     """
-    Single-scale CNN on raw EMG, single window.
-    Ablation of MHCNN: isolates the contribution of
-    multi-horizon parallel dilation from raw signal access alone.
-
     Input : (B, 8, 40) 
     """
     def __init__(self, ch: int = CH, emb_dim: int = 128,
@@ -219,7 +192,7 @@ class CNN(nn.Module):
 class CNN_HCF(nn.Module):
     """
     1D CNN over sub-windowed hand-crafted features.
-    Input : (B, F, 4)  — F features as channels, 4 sub-windows as time.
+    Input : (B, F, 4) - F features as channels, 4 sub-windows as time.
     """
     def __init__(self, n_feat: int, n_sub: int = N_SUB,
                  emb_dim: int = 128, num_classes: int = CLASSES,
@@ -462,6 +435,9 @@ class CVaRLoss(nn.Module):
 
 
 class PrototypeLoss(nn.Module):
+    """
+    Only prototypical compactness, no repulsion.
+    """
     def __init__(self, lambda_proto=0.5, normalize=True, weight=None):
         super().__init__()
         self.lambda_proto = lambda_proto
@@ -492,67 +468,6 @@ class PrototypeLoss(nn.Module):
 
         if count > 0:
             proto_loss = proto_loss / count
-
-        loss = (1 - self.lambda_proto) * ce + self.lambda_proto * proto_loss
-
-        return loss
-
-
-class OneVsAllLoss(nn.Module):
-    def __init__(self, lambda_proto=0.5, normalize=True, weight=None):
-        super().__init__()
-        self.lambda_proto = lambda_proto
-        self.normalize = normalize
-        self.ce = nn.CrossEntropyLoss(weight=weight)
-
-    def forward(self, emb, logits, labels):
-        if self.normalize:
-            emb = F.normalize(emb, dim=1)
-
-        ce = self.ce(logits, labels)
-        classes = torch.unique(labels)
-        proto_loss = 0.0
-
-        if len(classes) == 0:
-            pass
-        elif len(classes) == 1:
-            c = classes[0]
-            mask = labels == c
-            z = emb[mask]
-            if z.size(0) > 1:
-                proto = z.mean(dim=0, keepdim=True)
-                proto_loss = ((z - proto) ** 2).sum(dim=1).mean()
-        else:
-            # Multiple classes → full prototype loss:
-            #   - distance to own class mean  → lower loss when closer
-            #   - distance to every other class mean → lower loss when farther
-            # This is equivalent to a one-vs-all style softmax over negative distances
-            # (standard prototypical / metric-learning loss)
-            proto_list = []
-            class_to_idx = {}
-            for idx, c in enumerate(classes):
-                mask = labels == c
-                z = emb[mask]
-                proto = z.mean(dim=0)                     # (D,)
-                proto_list.append(proto)
-                class_to_idx[c.item()] = idx
-
-            protos = torch.stack(proto_list, dim=0)       # (K, D) where K = #classes in batch
-
-            # Squared Euclidean distances from every embedding to every prototype
-            # shape: (N, K)
-            dists = ((emb.unsqueeze(1) - protos.unsqueeze(0)) ** 2).sum(dim=-1)
-
-            target_idx = torch.tensor(
-                [class_to_idx[l.item()] for l in labels],
-                dtype=torch.long,
-                device=labels.device)
-
-            # Proto loss = CrossEntropy( -distances, true_class )
-            # → minimizing this simultaneously:
-            #     • pulls each sample toward its own class mean (closer = lower loss)
-            #     • pushes each sample away from all other class means (farther = lower loss)
-            proto_loss = F.cross_entropy(-dists, target_idx)
 
         loss = (1 - self.lambda_proto) * ce + self.lambda_proto * proto_loss
 
@@ -648,6 +563,70 @@ class TripletLoss(nn.Module):
 
 
 
+class OneVsAllLoss(nn.Module):
+    """
+    Prototypical loss with compactness and repulsion.
+    """
+    def __init__(self, lambda_proto=0.5, normalize=True, weight=None):
+        super().__init__()
+        self.lambda_proto = lambda_proto
+        self.normalize = normalize
+        self.ce = nn.CrossEntropyLoss(weight=weight)
+
+    def forward(self, emb, logits, labels):
+        if self.normalize:
+            emb = F.normalize(emb, dim=1)
+
+        ce = self.ce(logits, labels)
+        classes = torch.unique(labels)
+        proto_loss = 0.0
+
+        if len(classes) == 0:
+            pass
+        elif len(classes) == 1:
+            c = classes[0]
+            mask = labels == c
+            z = emb[mask]
+            if z.size(0) > 1:
+                proto = z.mean(dim=0, keepdim=True)
+                proto_loss = ((z - proto) ** 2).sum(dim=1).mean()
+        else:
+            # Multiple classes → full prototype loss:
+            #   - distance to own class mean  → lower loss when closer
+            #   - distance to every other class mean → lower loss when farther
+            # This is equivalent to a one-vs-all style softmax over negative distances
+            # (standard prototypical / metric-learning loss)
+            proto_list = []
+            class_to_idx = {}
+            for idx, c in enumerate(classes):
+                mask = labels == c
+                z = emb[mask]
+                proto = z.mean(dim=0)                     # (D,)
+                proto_list.append(proto)
+                class_to_idx[c.item()] = idx
+
+            protos = torch.stack(proto_list, dim=0)       # (K, D) where K = #classes in batch
+
+            # Squared Euclidean distances from every embedding to every prototype
+            # shape: (N, K)
+            dists = ((emb.unsqueeze(1) - protos.unsqueeze(0)) ** 2).sum(dim=-1)
+
+            target_idx = torch.tensor(
+                [class_to_idx[l.item()] for l in labels],
+                dtype=torch.long,
+                device=labels.device)
+
+            # Proto loss = CrossEntropy( -distances, true_class )
+            # → minimizing this simultaneously:
+            #     • pulls each sample toward its own class mean (closer = lower loss)
+            #     • pushes each sample away from all other class means (farther = lower loss)
+            proto_loss = F.cross_entropy(-dists, target_idx)
+
+        loss = (1 - self.lambda_proto) * ce + self.lambda_proto * proto_loss
+
+        return loss
+    
+    
 class AngularLoss(nn.Module):
     def __init__(self, temperature=0.07, normalize=True, weight=None, 
                  nm_label=0, w_ce=1.0, w_supcon=1.0, w_angle=1.0):
@@ -655,7 +634,7 @@ class AngularLoss(nn.Module):
         self.tau = temperature
         self.normalize = normalize
         self.ce = nn.CrossEntropyLoss(weight=weight)
-        self.nm_label = nm_label # Explicitly define which label is No Motion
+        self.nm_label = nm_label # Define which label is No Motion
         
         # Add weights to balance the loss scales
         self.w_ce = w_ce
@@ -682,7 +661,7 @@ class AngularLoss(nn.Module):
 
             protos = torch.stack(proto_list, dim=0)
 
-            # 1. FIX: Safely find the NM prototype
+            # Find the NM prototype
             if self.nm_label in class_to_idx:
                 nm_idx = class_to_idx[self.nm_label]
                 nm_proto = protos[nm_idx]
@@ -691,7 +670,7 @@ class AngularLoss(nn.Module):
                 active_mask = torch.arange(len(protos)) != nm_idx
                 active_protos = protos[active_mask]
 
-                # 2. FIX: Correctly calculate angular penalty on valid upper triangle
+                # Calculate angular penalty on valid upper triangle
                 if len(active_protos) > 1:
                     directions = F.normalize(active_protos - nm_proto, dim=1)
                     cos_sim = directions @ directions.T
@@ -707,7 +686,7 @@ class AngularLoss(nn.Module):
         
         pos_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)) & mask_self
 
-        # 3. FIX: Numerical stability for exponents
+        # Numerical stability
         sim_max, _ = torch.max(sim, dim=1, keepdim=True)
         sim_stable = sim - sim_max.detach()
 
