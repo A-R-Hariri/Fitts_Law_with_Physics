@@ -18,7 +18,7 @@ from libemg.feature_extractor import FeatureExtractor
 from torch.nn.utils import clip_grad_norm_
 
 
-NAME = '14'
+NAME = '10'
 
 
 def is_notebook():
@@ -197,18 +197,15 @@ def eval_within_lda(model, x, meta):
     return results
 
 
-def extract_full(windows, feat_list, feat_dic):
-    """Full window features. Returns (N, CH*n_feats) → (N, F)"""
+
+
+def extract_full(windows, feat_list, feat_dic={}):
     fe = FeatureExtractor()
     return fe.extract_features(feat_list, windows, array=True,
                                fix_feature_errors=True,
                                feature_dic=feat_dic).reshape(windows.shape[0], -1)
 
 def extract_sub(windows, feat_list, feat_dic, n_sub=N_SUB):
-    """
-    Split each (N, CH, T) window into n_sub sub-windows of (N, CH, T//n_sub),
-    extract features on each, return (N, n_sub, F).
-    """
     fe = FeatureExtractor()
     N, CH, T = windows.shape
     assert T % n_sub == 0, f"T={T} not divisible by n_sub={n_sub}"
@@ -223,14 +220,6 @@ def extract_sub(windows, feat_list, feat_dic, n_sub=N_SUB):
 
 
 def normalize_features(tr, va, te):
-    """
-    Fit StandardScaler on training data only.
-    Apply to val and test without leaking test statistics.
-
-    Works for both:
-      full window : (N, F)
-      sub-windowed: (N, N_SUB, F) — reshape, scale, reshape back
-    """
     shape_tr = tr.shape
     shape_va = va.shape
     shape_te = te.shape
@@ -254,15 +243,14 @@ def normalize_features(tr, va, te):
 
 
 def population_channel_stats(windows, batch=200_000):
-    """Compute raw per-channel mean and std. Pass raw (non-normalized) windows."""
     N, C, T = windows.shape
     s1 = np.zeros(C, np.float64)
     s2 = np.zeros(C, np.float64)
     count = 0
     for i in range(0, N, batch):
         c = np.asarray(windows[i:i+batch], dtype=np.float64)
-        s1    += c.sum(axis=(0, 2))
-        s2    += (c * c).sum(axis=(0, 2))
+        s1 += c.sum(axis=(0, 2))
+        s2 += (c * c).sum(axis=(0, 2))
         count += c.shape[0] * T
     mean = (s1 / count).astype(np.float32)
     std  = np.sqrt(np.clip(s2 / count - (s1/count)**2, 0, None)).astype(np.float32)
@@ -285,12 +273,7 @@ class RunningNorm(nn.Module):
     def __init__(self, num_channels, tau,
                  init_mean=None, init_std=None,
                  eps=1e-6, prior_weight=RN_PRIOR_WEIGHT):   
-        """
-        tau: time constant in windows.
-             tau=inf  → exact cumulative mean (session ceiling).
-             tau=N    → EMA that closes 63% of a step change in N windows.
-        alpha per-window = 1 - exp(-1/tau), batch-size invariant by construction.
-        """
+        
         super().__init__()
         self.tau = tau
         self.eps = eps
@@ -302,10 +285,10 @@ class RunningNorm(nn.Module):
         im  = im.view(1, -1, 1)
         ist = ist.view(1, -1, 1)
 
-        self.register_buffer("init_mean",    im.clone())
-        self.register_buffer("init_sq",      (ist**2 + im**2).clone())
+        self.register_buffer("init_mean", im.clone())
+        self.register_buffer("init_sq", (ist**2 + im**2).clone())
         self.register_buffer("running_mean", im.clone())
-        self.register_buffer("running_sq",   (ist**2 + im**2).clone())
+        self.register_buffer("running_sq", (ist**2 + im**2).clone())
         self.register_buffer("n_updates", torch.tensor([float(prior_weight)], dtype=torch.float32))
         self.prior_weight = float(prior_weight)
 
@@ -336,6 +319,105 @@ class RunningNorm(nn.Module):
         self.running_mean.copy_(self.init_mean)
         self.running_sq.copy_(self.init_sq)
         self.n_updates.fill_(self.prior_weight) 
+
+@torch.no_grad()
+def eval_test_running(model, norm_layer, data, name, seed,
+                      batch_size=BATCH_SIZE, shuffle=True, warmup=0,
+                      device=DEVICE, save=True, csv_path=RESULTS_PATH):
+    model.to(device).eval()
+    norm_layer.to(device).eval()
+    results = {}
+
+    if save:
+        os.makedirs(f"{FIGURE_PATH}/{name}/", exist_ok=True)
+
+    for tag, (windows, meta) in data.items():
+        subjects = np.asarray(meta['subjects']).reshape(-1)
+        labels   = np.asarray(meta['classes']).reshape(-1)
+        uniq     = np.unique(subjects)
+        n_subj   = len(uniq)
+        acc = np.zeros(n_subj); act = np.zeros(n_subj)
+        bal = np.zeros(n_subj); f1  = np.zeros(n_subj)
+        rng = np.random.default_rng(seed)
+        all_preds = np.empty(len(subjects), np.int64)
+
+        for i, s in enumerate(tqdm(uniq, desc=f"{name}/{tag}")):
+            norm_layer.reset()
+            idx = np.where(subjects == s)[0]
+            Xs  = np.asarray(windows[idx], dtype=np.float32)
+            ys  = labels[idx]
+
+            if shuffle:
+                p   = rng.permutation(len(idx))
+                Xs  = Xs[p]; ys = ys[p]
+
+            preds = np.empty(len(idx), np.int64)
+            for b in range(0, len(idx), batch_size):
+                xb = torch.from_numpy(Xs[b:b+batch_size]).to(device, non_blocking=True)
+                xb = norm_layer(xb)
+                preds[b:b+xb.size(0)] = model(xb).argmax(1).cpu().numpy()
+
+            # store in original dataset order so all_preds aligns with labels
+            if shuffle:
+                all_preds[idx[p]] = preds
+            else:
+                all_preds[idx] = preds
+
+            ps, ls = (preds[warmup:], ys[warmup:]) if warmup else (preds, ys)
+            acc[i] = (ps == ls).mean() * 100
+            f1[i]  = f1_score(ls, ps, average='macro')
+            am     = ls != 0
+            act[i] = (ps[am] == ls[am]).mean() * 100 if am.any() else 0.0
+            cm     = confusion_matrix(ls, ps, labels=np.arange(CLASSES))
+            with np.errstate(divide='ignore', invalid='ignore'):
+                bal[i] = np.nanmean(np.diag(cm) / cm.sum(axis=1)) * 100
+
+        print(f"{name}/{tag} | Acc {acc.mean():.2f} ± {acc.std():.2f} "
+              f"| Actv {act.mean():.2f} ± {act.std():.2f} "
+              f"| Bal {bal.mean():.2f} ± {bal.std():.2f} "
+              f"| F1 {f1.mean():.4f} ± {f1.std():.4f}")
+
+        if save:
+            _idx = np.argsort(bal)
+            fig, axs = plt.subplots(2, 2, figsize=(11, 11), dpi=200)
+            ax1, ax2, ax3, ax4 = axs.flatten()
+            fig.suptitle(
+                f"{tag} | Mean Acc {acc.mean():.2f} ± {acc.std():.2f} "
+                f"| Mean Actv {act.mean():.2f} ± {act.std():.2f} "
+                f"| Mean Bal {bal.mean():.2f} ± {bal.std():.2f} "
+                f"| Mean F1 {f1.mean():.2f} ± {f1.std():.2f}"
+            )
+            ax1.bar(np.arange(n_subj), acc[_idx]) 
+            ax1.axhline(acc.mean(), color='red', linestyle='--')
+            ax1.set_title('Per Subject Accuracy')
+            ax2.bar(np.arange(n_subj), act[_idx]) 
+            ax2.axhline(act.mean(), color='red', linestyle='--')
+            ax2.set_title('Per Subject Active Accuracy')
+            ax3.bar(np.arange(n_subj), bal[_idx]) 
+            ax3.axhline(bal.mean(), color='red', linestyle='--')
+            ax3.set_title('Per Subject Balanced Accuracy')
+            ax4.bar(np.arange(n_subj), f1[_idx]) 
+            ax4.axhline(f1.mean(),  color='red', linestyle='--')
+            ax4.set_title('Per F1 Score')
+            fig.tight_layout(rect=[0, 0, 1, 0.95])
+            fig.savefig(f"{FIGURE_PATH}/{name}/{tag}.jpg")
+            fig.clf(); plt.close(fig)
+
+            os.makedirs(f"{CHECKPOINT_PATH}/{name}/", exist_ok=True)
+            np.save(f"{CHECKPOINT_PATH}/{name}/results_{tag}.npy", np.stack((acc, act, bal, f1)))
+            np.save(f"{CHECKPOINT_PATH}/{name}/preds_{tag}.npy",   all_preds)
+            np.save(f"{CHECKPOINT_PATH}/{name}/labels_{tag}.npy",  labels)
+
+        results[tag] = {"acc_mean": acc.mean(), "acc_std": acc.std(),
+                        "act_acc_mean": act.mean(), "act_acc_std": act.std(),
+                        "bal_acc_mean": bal.mean(), "bal_acc_std": bal.std(),
+                        "F1": f1.mean(), "F1_std": f1.std()}
+
+    rows = [{"model": name, "test_set": tag, **r} for tag, r in results.items()]
+    pd.DataFrame(rows).to_csv(csv_path, mode='a', index=False,
+                              header=not os.path.exists(csv_path))
+
+    return results
 
 
 
