@@ -17,7 +17,6 @@ pilot*
 checkpoints*
 emg_logs
 pickles
-test*
 *.png
 /fitts_results*
 fitts_analysis*.py
@@ -28,3 +27,4 @@ fitts_logs*
 /main_study
 *.rar
 *.zip
+*test*
