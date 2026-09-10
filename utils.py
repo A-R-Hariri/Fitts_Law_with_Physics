@@ -18,9 +18,6 @@ from libemg.feature_extractor import FeatureExtractor
 from torch.nn.utils import clip_grad_norm_
 
 
-NAME = '10'
-
-
 def is_notebook():
     try:
         from IPython import get_ipython; shell = get_ipython()
@@ -32,6 +29,10 @@ if is_notebook():
     from tqdm.notebook import tqdm
 else:
     from tqdm import tqdm
+
+
+NAME = '10'
+
 
 DTYPE = np.float32
 PICKLE_PATH = 'checkpoints'; FIGURE_PATH = 'figures'; 
