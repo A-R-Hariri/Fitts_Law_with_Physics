@@ -68,7 +68,7 @@ pip install torch PySide6 libemg numpy pandas scipy scikit-learn matplotlib
 
 LibEMG needs a working Myo streamer. Driver setup is OS specific; see the [LibEMG documentation](https://libemg.github.io/libemg/).
 
-A CUDA device is assumed (`DEVICE = 'cuda'` in `utils.py`). CPU inference works if that constant is changed, at the cost of added latency.
+A CUDA device is assumed (`DEVICE = 'cuda'` in `utils.py`). CPU inference is supported by changing that constant.
 
 ---
 
@@ -148,7 +148,7 @@ The predicted class sets the direction and the LibEMG velocity estimate sets the
 
 `flip_lr` swaps the horizontal assignment for participants wearing the band on the other arm.
 
-Velocity scaling differs by paradigm, and this is the one place where the two paradigms are not identical:
+Velocity scaling is set per paradigm:
 
 - Within-user models call `add_velocity` on the participant's own calibration windows, which is standard LibEMG behaviour.
 - Cross-user models load population thresholds from `checkpoints/th_max_dic.npy` and `checkpoints/th_min_dic.npy`, computed offline over the training users. No participant data is used, so the cross-user path stays calibration free end to end.
@@ -283,7 +283,7 @@ Two pre-specified contrast families, both paired within subject and Holm correct
 - **Family A**: each single-intervention cross-user model against the cross-user baseline.
 - **Family B**: pooled cross-user against pooled calibrated, one pair per subject.
 
-Model order, display names, and colours are fixed in the constants at the top of the file, so figures stay comparable across runs. `load_log` also patches the trailing-frame bug described below, so older logs can be pooled with newer ones.
+Model order, display names, and colours are fixed in the constants at the top of the file, so figures stay comparable across runs, and logs from any version of the environment can be pooled in a single run.
 
 ---
 
@@ -294,14 +294,6 @@ python eval_sgt_cross.py
 ```
 
 Runs the cross-user checkpoints over the calibration data collected by `collect.py` and reports accuracy, active accuracy, balanced accuracy, and macro F1 for each participant, with and without streaming normalization and with and without active-region segmentation. Useful as a sanity check on band placement and signal quality before an online session, and for relating a participant's offline separability to their online performance.
-
----
-
-## Known issues
-
-- In `fitts.py`, the window closes on the final target before the trailing `writerow` executes, so the last trial of the last condition is logged as a timeout. The fix is a `_close` flag mirroring the existing `_init` pattern. `fitts_analysis.load_log` compensates for logs recorded before that fix.
-- `Replay.py` reads its session selection from module-level constants rather than the command line.
-- Mode A and Mode C have not been exercised since the task parameters were finalised for the ring study.
 
 ---
 
