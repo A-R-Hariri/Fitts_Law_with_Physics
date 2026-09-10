@@ -347,6 +347,7 @@ class FittsTest(QWidget):
 
     def update_frame(self):
         _init = False
+        _close = False
         params = self.sc.params
         x_in, y_in = self.sc.emg_x, self.sc.emg_y
         self.frame_count += 1
@@ -380,12 +381,12 @@ class FittsTest(QWidget):
                         self.current_combo_idx += 1
                         self.targets_hit_current_combo = 0
                         # self.ring_index = 0
-                        if self.current_combo_idx >= len(self.combinations): self.close() # TODO: Move to the end
+                        if self.current_combo_idx >= len(self.combinations): _close = True 
                         else: _init = True
                     else:
                         _init = True
                 else:
-                    if self.targets_hit >= params['max_targets']: self.close() # TODO: Move to the end
+                    if self.targets_hit >= params['max_targets']: _close = True
                     else: _init = True
         elif params['mode'] == "C":
             for i in range(2):
@@ -397,7 +398,8 @@ class FittsTest(QWidget):
                              *self.cursor_pos, *self.target_pos, self.target_radius, x_in, y_in,
                              *self.actual_velocity, acc_x, acc_y, int(inside), self.hold_counter,
                              self.sc.raw_velocity, *self.sc.probs])
-        if _init: self.init_target()
+        if _close: self.close()
+        elif _init: self.init_target()
         self.update()
 
     def paintEvent(self, event):
