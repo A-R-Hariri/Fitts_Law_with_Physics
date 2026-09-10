@@ -1,210 +1,316 @@
-# Fitts' Law Environment with Physics for Myoelectric Control
+# Fitts' Law Target-Acquisition Environment for Myoelectric Control
 
-A configurable 2D Fitts' law target acquisition environment for evaluating EMG-driven myoelectric control. Designed around the Myo armband and LibEMG, it supports physics-based cursor dynamics, three task modes, hot-swappable classifiers, and per-frame CSV logging. Used for two distinct research purposes:
+A real-time 2D target-acquisition environment for evaluating EMG-driven cursor control with a Myo armband. The environment hosts several classifiers at once, switches between them at runtime without restarting, and logs one row per rendered frame.
 
-1. **EMG classifier evaluation**: comparing zero-shot cross-user models against within-user calibrated models in a standardized human-subject pointing task.
-2. **Bypass prosthetic correlation research**: investigating the correlation between graphical cursor control performance and physical prosthetic hand control performance (screen-based Fitts vs. Dynamixel bypass arm).
+This is the online evaluation platform used for the closed-loop study comparing calibration-free cross-user models against user-specific calibrated models. The offline pipeline that trains those models lives in a separate repository (see [Related repository](#related-repository)).
 
----
-
-## System Architecture
-
-```
-Myo armband (8-ch sEMG, 200 Hz)
-    -> LibEMG online streamer
-    -> OnlineEMGClassifier x3 (cross-user, within-CNN, within-MLP)
-    -> UDP sockets (probabilities + velocity)
-    -> input_thread (gesture -> 2D velocity vector)
-    -> FittsTest (PySide6, QTimer at frame_rate Hz)
-         -> physics integration (optional)
-         -> cursor position update
-         -> target hit detection
-         -> per-frame CSV log
-```
-
-Three parallel classifiers run simultaneously on separate UDP ports. The active classifier is selected at runtime from the Dashboard without restarting the application.
+The optional physics layer (inertia, damping, acceleration limits) is included for work on how cursor dynamics affect throughput and error rate. It is disabled by default and was disabled for the reported study, so the cursor responds to the classifier output with no added dynamics.
 
 ---
 
-## Files
+## System overview
+
+```
+Myo armband (8 channels, 200 Hz, signed 8-bit)
+  -> LibEMG streamer + OnlineDataHandler
+  -> OnlineEMGClassifier x2 (cross-user port 12346, within-user port 12347)
+       each wraps a MultiModelWrapper holding several models
+  -> UDP on 127.0.0.1 (class probabilities + velocity)
+  -> input_thread: predicted class -> 2D velocity vector, scaled by EMG amplitude
+  -> SharedContext (multiprocessing Manager namespace)
+  -> FittsTest window (PySide6 QTimer at frame_rate Hz)
+       -> optional physics integration
+       -> cursor update, hit and timeout detection
+       -> per-frame CSV row
+```
+
+Classification runs at the LibEMG window rate (SEQ 40, INC 5, so 40 Hz). Rendering runs at 60 Hz and is decoupled from inference: each frame consumes the most recent decoded velocity rather than waiting for a new prediction, so the applied velocity is at most one classifier period old. No smoothing, majority vote, or rejection is applied.
+
+Only two classifier processes run, one per input representation. Every raw-window model (all cross-user variants and the fine-tuned within-user models) is held inside the first wrapper; the hand-crafted-feature model is held inside the second. Switching models is a dictionary lookup inside the wrapper keyed on `SharedContext.active_model_name`, so there is no reload cost and no gap in the stream.
+
+---
+
+## Repository contents
 
 ```
 Fitts_Law_with_Physics/
-    main.py         -- Entry point: classifier loading, LibEMG setup, Dashboard launch
-    Fitts.py        -- Dashboard (Qt config UI) and FittsTest (task window)
-    collect.py      -- Per-user SGT data collection and within-user model training
-    Replay.py       -- Frame-accurate replay of saved session CSV logs
-    models.py       -- Model architecture definitions (CNN, CNN_GRL, MLP)
-    utils.py        -- Hyperparameters, data loaders, training/evaluation utilities
+  main.py               Entry point: model loading, LibEMG setup, UDP sockets, Dashboard launch
+  fitts.py              Dashboard (Qt config window) and FittsTest (task window, logging)
+  collect.py            Screen-guided training data collection and within-user model training
+  models.py             Architectures: MHCNN, CNN, CNN_HCF, MLP, GRL variants, RunningNorm
+  utils.py              Participant ID, paths, task parameters, feature settings, shared utilities
+  Replay.py             Frame-accurate replay and figure export from a saved session log
+  fitts_analysis.py     Trial extraction, metrics, planned contrasts, plots for a whole study
+  eval_sgt_cross.py     Offline check of cross-user checkpoints on the participant's own SGT data
+  mouse_cursor_control.py   Standalone system-mouse control using the same classifier stack
 ```
+
+Logs, checkpoints, gesture images, and figures are excluded from version control.
 
 ---
 
-## Dependencies
+## Requirements
 
 ```
 torch
 PySide6
 libemg
 numpy
+pandas
+scipy
 scikit-learn
+matplotlib
 ```
 
 ```bash
-pip install torch PySide6 libemg numpy scikit-learn
+pip install torch PySide6 libemg numpy pandas scipy scikit-learn matplotlib
 ```
 
-LibEMG requires additional setup for the Myo streamer. Refer to the [LibEMG documentation](https://libemg.github.io/libemg/) for OS-specific Myo driver installation.
+LibEMG needs a working Myo streamer. Driver setup is OS specific; see the [LibEMG documentation](https://libemg.github.io/libemg/).
+
+A CUDA device is assumed (`DEVICE = 'cuda'` in `utils.py`). CPU inference works if that constant is changed, at the cost of added latency.
 
 ---
 
-## Task Modes
+## Configuration
 
-The environment implements three target acquisition modes, all selectable from the Dashboard at runtime.
+All participant and task settings live in `utils.py`.
 
-**Mode A — Random**: on each acquisition, a new target appears at a random angle and random distance from the current cursor position. Distance is sampled uniformly from `target_distance_range` and target radius is drawn from `target_radius_list`. This mode does not enforce a fixed index of difficulty.
+`NAME` is the participant identifier. It selects three directories and must be changed before each new participant:
 
-**Mode B — ISO Ring**: Has 12 targets which are placed at equal angular intervals on a circle of radius `ring_radius` centered on the screen. The sequence visits opposite sides of the ring following the standard alternating order `[0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11, ...]`. Multiple `(ring_radius, target_radius)` combinations can be provided as comma-separated lists in the Dashboard; the task cycles through all combinations in sequence. This mode produces the data needed for computing throughput (bits/s) under Fitts' law.
+```
+user_sgt/<NAME>/     calibration data and within-user weights
+emg_logs/<NAME>/     raw 8-channel EMG stream
+fitts_logs/<NAME>/   per-frame task logs
+```
 
-**Mode C — Moving Target**: the target moves continuously and bounces off the screen boundaries. Target velocity is set by the `c_vel` parameter and direction is randomized at initialization. The user must intercept the moving target and hold the cursor inside it for `hold_frames_required` frames.
+Cross-user checkpoints and the population velocity thresholds are read from `checkpoints/`.
+
+`PARAMS` holds the task defaults. Every entry except `screen_size` and the radius lists can also be changed live from the Dashboard.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `frame_rate` | 60 | Render and control loop rate (Hz) |
+| `mode` | `'B'` | Task mode (A, B, or C) |
+| `hold_frames_required` | 45 | Dwell frames inside the target to register a hit (0.75 s at 60 Hz) |
+| `target_timeout_frames` | 480 | Frames before the trial is abandoned (8 s at 60 Hz) |
+| `max_targets` | 12 | Acquisitions per ring/radius combination |
+| `ring_radius_list` | `[300, 375, 450]` | Mode B ring radii (px) |
+| `target_radius_list` | `[30, 21, 12]` | Target radii (px), paired elementwise with the ring radii |
+| `target_distance_range` | `[200, 400]` | Mode A distance range (px) |
+| `screen_size` | `(1690, 980)` | Task window size (px) |
+| `physics.enabled` | `False` | Enable inertia and damping |
+| `physics.mass` | `5` | Higher mass gives a slower response |
+| `physics.max_acceleration` | `0.08` | Acceleration clip per frame |
+| `physics.damping` | `1.0` | Velocity retained per frame (1.0 is no damping) |
+| `c_vel` | `1` | Mode C target speed |
+| `snap_back` | `False` | Teleport the cursor onto the target after a timeout |
+
+`VEL_CONSTANT` in `fitts.py` is the base gain, 20 px per frame at full EMG amplitude. The Dashboard speed multiplier scales it further and is set automatically on model change: 1.2 for cross-user models, 1.0 for within-user models. The cross-user boost was fixed in piloting so that cursor speed was comparable across paradigms and the comparison would not be dominated by the velocity mapping.
 
 ---
 
-## Physics Model
+## Difficulty conditions
 
-When physics is enabled, the cursor does not respond instantaneously to the classifier output. Instead, the input velocity signal is treated as a desired velocity, and a simple Newtonian integrator governs the actual cursor motion:
+In Mode B the ring and target radius lists are zipped, so the defaults give three conditions run in sequence, each for `max_targets` acquisitions. Amplitude is the ring diameter and width is the target diameter, giving the Shannon index of difficulty `ID = log2(A/W + 1)`:
+
+| Condition | Ring radius (px) | A (px) | W (px) | ID (bits) |
+|---|---|---|---|---|
+| Easy | 300 | 600 | 60 | 3.46 |
+| Medium | 375 | 750 | 42 | 4.24 |
+| Hard | 450 | 900 | 24 | 5.27 |
+
+Twelve targets are placed at equal angles on each ring and visited in the standard multidirectional order `[0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11, ...]`, so consecutive targets sit on opposite sides of the ring. With the defaults, one model produces 36 acquisitions.
+
+---
+
+## Task modes
+
+**Mode A, random.** Each new target appears at a random angle and a random distance drawn from `target_distance_range`, with a radius drawn from `target_radius_list`. Index of difficulty is not fixed, so this mode is for practice and familiarisation rather than throughput measurement.
+
+**Mode B, ISO ring.** The multidirectional arrangement described above. This is the mode used for all reported results.
+
+**Mode C, moving target.** The target translates at `c_vel` and reflects off the window edges. The participant must intercept it and hold the cursor inside for the dwell period. Intended for pursuit and interception work, not for Fitts' law measurement.
+
+---
+
+## Control mapping
+
+The predicted class sets the direction and the LibEMG velocity estimate sets the speed. Rest holds the cursor still.
+
+| Class | Cursor direction |
+|---|---|
+| NM (no motion) | stationary |
+| HC (hand close) | down |
+| HO (hand open) | up |
+| FX (wrist flexion) | left, or right if `flip_lr` is set |
+| EX (wrist extension) | right, or left if `flip_lr` is set |
+
+`flip_lr` swaps the horizontal assignment for participants wearing the band on the other arm.
+
+Velocity scaling differs by paradigm, and this is the one place where the two paradigms are not identical:
+
+- Within-user models call `add_velocity` on the participant's own calibration windows, which is standard LibEMG behaviour.
+- Cross-user models load population thresholds from `checkpoints/th_max_dic.npy` and `checkpoints/th_min_dic.npy`, computed offline over the training users. No participant data is used, so the cross-user path stays calibration free end to end.
+
+---
+
+## Physics model
+
+With physics enabled the classifier output is treated as a desired velocity and the cursor follows a first-order integrator:
 
 ```
 acc = (desired_v - actual_v) / mass
 acc = clip(acc, -max_acceleration, +max_acceleration)
 actual_v = (actual_v + acc) * damping
-cursor_pos += actual_v
+pos += actual_v
 ```
 
-When disabled, `actual_v = desired_v` and the cursor moves directly proportional to the EMG velocity output with no inertia or delay.
-
-The physics model is intended to study how inertia and damping affect Fitts' law throughput and error rate in EMG control, and to more closely replicate the dynamics of a physical prosthetic limb compared to a frictionless graphical cursor. This is the basis of the graphical vs. physical control correlation research.
+With physics disabled, `actual_v = desired_v` and position is integrated directly. The logged `acc_x` and `acc_y` columns are zero in that case.
 
 ---
 
-## Gesture-to-Cursor Mapping
+## Running a session
 
-Four active gestures are mapped to a 2D cursor velocity vector. The `raw_velocity` from LibEMG's velocity estimator (proportional to EMG signal strength, clipped to [0, 1]) scales movement speed.
-
-| Gesture | Direction | Notes |
-|---------|-----------|-------|
-| HC (hand close) | Down (+Y) | |
-| HO (hand open) | Up (-Y) | |
-| FX (flexion) | Left (−X) or Right (+X) | Controlled by flip_lr |
-| EX (extension) | Right (+X) or Left (−X) | Controlled by flip_lr |
-| NM (rest) | No movement | |
-
-The `flip_lr` toggle swaps the FX/EX horizontal assignment to accommodate left-arm users. The `speed_multiplier` in the Dashboard scales the overall cursor speed by a constant factor on top of the EMG velocity signal.
-
----
-
-## Running
-
-### Step 1 — Collect per-user calibration data (within-user models only)
-
-Skip this step if using only the cross-user model (`cnn_raw`).
+### 1. Collect calibration data (only if within-user models are needed)
 
 ```bash
 python collect.py
 ```
 
-This launches the LibEMG screen-guided training (SGT) GUI if calibration data does not already exist in `user_sgt/<NAME>/`. The GUI prompts the user to perform 15 repetitions of each gesture (3 s active, 2 s rest). After collection, `collect.py` automatically trains and saves six within-user models: CNN and MLP fine-tuned with 2, 5, and 13 reps.
+If `user_sgt/<NAME>/` is empty this launches the LibEMG screen-guided training GUI: `TOTAL_REPS` repetitions of each of the five gestures, 3 s of contraction and 3 s of rest per repetition. It then trains and saves the within-user models, using the first 1 and the first 5 repetitions so that both calibration budgets are available online.
 
-The `NAME` variable in `utils.py` controls which subdirectory is used for a given participant. Change it before running for each new subject.
+Skip this step for a purely calibration-free session.
 
-### Step 2 — Launch the environment
+### 2. Launch
 
 ```bash
 python main.py
 ```
 
-On startup:
-- All models listed in `model_names` are loaded from `pickles/` or `user_sgt/<NAME>/`
-- Three LibEMG online classifiers start on ports 12346–12348
-- Raw EMG is logged to `emg_logs/<NAME>/`
-- The Dashboard window opens
+On startup `main.py`:
 
-### Step 3 — Configure and run a session
+- loads every checkpoint listed in `model_names` (cross-user weights from `checkpoints/`, within-user weights from `user_sgt/<NAME>/`),
+- shuffles that list, so the order in the Dashboard dropdown differs per participant,
+- starts the two online classifiers and binds their UDP sockets,
+- starts logging the raw EMG stream to `emg_logs/<NAME>/`,
+- opens the Dashboard.
 
-In the Dashboard:
-1. Select the active model from the dropdown.
-2. Set mode (A/B/C), frame rate, target parameters, and physics settings.
-3. Optionally enter a label string that is appended to the log filename.
-4. Check "Test Run" to prefix the output filename with `Test_` (useful for practice trials that should be excluded from analysis).
-5. Click "Launch / Update Test" to open the task window.
+The dropdown shows one-letter codes from `MODEL_DICT` rather than model names. Combined with the shuffle, this keeps the model identity out of view during a session and keeps the presentation order counterbalanced.
 
-The task window closes automatically when the target quota (`max_targets`) is reached or all ring/radius combinations are exhausted (Mode B). Logs are written to `fitts_logs/<NAME>/`.
+### 3. Run
+
+In the Dashboard: pick the model code, set mode and task parameters, optionally type a label to append to the filename, then click **Launch / Update Test**.
+
+Keep **Test Run** checked for practice blocks. It prefixes the filename with `Test_`, and both `Replay.py` and `fitts_analysis.py` skip any file or subject folder whose name contains `test`.
+
+The task window closes on its own once every ring/radius combination has reached `max_targets`.
 
 ---
 
-## Data Collection and Logging
+## Log format
 
-Each session produces a CSV file at `fitts_logs/<NAME>/[Test_]Fitts_<timestamp>_<model>[_<label>].csv`.
+One CSV per session at:
 
-One row is written per frame at the configured frame rate. Columns:
+```
+fitts_logs/<NAME>/[Test_]Fitts_<YYYY-MM-DD_HH-MM-SS>_<model>[_<label>].csv
+```
 
-| Column | Description |
-|--------|-------------|
+One row per rendered frame:
+
+| Column | Content |
+|---|---|
 | `time` | Unix timestamp |
-| `frame` | Frame index within session |
-| `mode` | Task mode (A/B/C) |
+| `frame` | Frame index within the session |
+| `mode` | Task mode |
 | `model` | Active model name |
-| `cursor_x`, `cursor_y` | Cursor position (pixels) |
-| `target_x`, `target_y` | Target center (pixels) |
-| `radius` | Target radius (pixels) |
-| `X`, `Y` | Raw EMG velocity input (-1 to 1) |
-| `vx`, `vy` | Actual cursor velocity after physics |
-| `acc_x`, `acc_y` | Applied acceleration (0 if physics disabled) |
-| `inside` | 1 if cursor inside target, 0 otherwise |
-| `hold_count` | Consecutive frames inside target |
-| `velocity` | Raw EMG velocity magnitude from LibEMG |
-| `probs_0..4` | Classifier softmax probabilities per gesture |
+| `cursor_x`, `cursor_y` | Cursor position (px) |
+| `target_x`, `target_y` | Target centre (px) |
+| `radius` | Target radius (px) |
+| `X`, `Y` | Decoded input velocity, range -1 to 1 |
+| `vx`, `vy` | Applied cursor velocity after physics |
+| `acc_x`, `acc_y` | Applied acceleration, 0 when physics is off |
+| `inside` | 1 when the cursor is inside the target |
+| `hold_count` | Consecutive frames inside the target |
+| `velocity` | EMG amplitude estimate from LibEMG |
+| `probs_0` to `probs_4` | Class probabilities, ordered NM, HC, FX, EX, HO |
 
-The simultaneous EMG log at `emg_logs/<NAME>/` contains the raw 8-channel Myo stream, enabling post-hoc re-classification or offline analysis.
+The parallel raw EMG log under `emg_logs/<NAME>/` carries the full 8-channel stream, which allows any session to be reclassified offline without rerunning the participant.
+
+Trials are recovered from the log rather than written explicitly: a new trial starts wherever the target coordinates or radius change, conditions are grouped by quantised target distance, and the outcome is a hit if the trial ended on a full dwell and a timeout otherwise.
 
 ---
 
 ## Replay
 
-To visually replay a saved session at the original frame rate:
-
 ```bash
 python Replay.py
 ```
 
-Edit the hardcoded CSV path in `Replay.py` before running (or adapt it to accept a command-line argument). The replay renders the same Qt window as the live session, correctly reconstructing the ring layout for Mode B from the logged target coordinates.
+Set `USER_ID`, `MODEL`, and `SESSION_INDEX` at the top of the file, or point `LOG_PATH` at a specific CSV. The window reconstructs the ring layout and cursor motion from the logged coordinates alone.
+
+Controls: space pauses, arrows step one frame, `,` and `.` step by trial, `[` and `]` step by condition, `T` toggles the trace, `S` saves a frame.
+
+The side panel exposes the trace options: scope (session, condition, trial, or sliding window), and colour source (speed, gesture, elapsed time, or flat). Speed colouring auto-fits its upper limit to the 98th percentile of the session, which must be pinned with `SPEED_VMAX` when producing figures that are compared across models.
+
+`PAPER_MODE` switches to a white background and `SHOT_SCALE` controls export resolution. **Save frame** writes the current state and **Save full path** writes the whole session trace, both at export resolution rather than screen resolution.
 
 ---
 
-## Configuration Reference
+## Analysis
 
-All default parameters are defined in `utils.py` and can be overridden live from the Dashboard. The `PARAMS` dictionary passed to `SharedContext` on startup contains:
+```bash
+python fitts_analysis.py
+```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `frame_rate` | 60 | Display and control loop update rate (Hz) |
-| `mode` | `'B'` | Task mode (A/B/C) |
-| `hold_frames_required` | 30 | Consecutive frames inside target to count as hit (modes A/B) |
-| `target_timeout_frames` | 420 | Frames before target auto-advances (modes A/B) |
-| `max_targets` | 12 | Targets to acquire before session ends |
-| `target_radius_list` | `[20, 10]` | Target radii to cycle through (pixels) |
-| `ring_radius_list` | `[300, 450]` | Ring radii for Mode B (pixels) |
-| `target_distance_range` | `[200, 400]` | Random target distance range for Mode A (pixels) |
-| `screen_size` | `(1690, 980)` | Task window dimensions (pixels) |
-| `physics.enabled` | `False` | Enable inertia/damping on cursor |
-| `physics.mass` | `5` | Inertia: higher = slower response |
-| `physics.max_acceleration` | `0.08` | Max acceleration per frame |
-| `physics.damping` | `1.0` | Velocity decay per frame (1.0 = no damping) |
-| `c_vel` | `1` | Moving target speed for Mode C |
-| `snap_back` | `False` | Teleport cursor to target on timeout |
+Walks the log root, skips anything marked as a test, extracts trials, and writes one output directory containing:
+
+| File | Content |
+|---|---|
+| `manifest.csv` | One row per discovered log file |
+| `trials_long.csv` | One row per trial |
+| `per_subject_model.csv` | Metrics per subject and model |
+| `per_subject_model_condition*.csv` | The same, split by difficulty condition |
+| `fitts_regression.csv` | Slope, intercept, grand and per-subject R2 for MT against ID |
+| `summary_by_model.csv` | Mean, SD, median, IQR, range, plus rank by mean and by consistency |
+| `contrasts_<metric>.csv` | Planned contrasts per metric |
+| `*.png` | Per-metric boxplots with subject-coloured points, a combined grid, by-ID panels, and the regression panels |
+
+Metrics computed per trial and averaged per subject and model: completion rate; movement time excluding the dwell period; nominal, effective, and mean-of-means throughput, each with a penalized variant that charges failed trials their full timeout; path efficiency; direction-change ratio; overshoots; stopping distance; reaction time; and a quality composite that z-scores the four trajectory-quality measures across all subject-model cells, flips signs so higher is better, and averages them.
+
+Two pre-specified contrast families, both paired within subject and Holm corrected inside the family, reported with Wilcoxon signed-rank statistics, matched-pairs rank-biserial correlation, and Cohen's dz:
+
+- **Family A**: each single-intervention cross-user model against the cross-user baseline.
+- **Family B**: pooled cross-user against pooled calibrated, one pair per subject.
+
+Model order, display names, and colours are fixed in the constants at the top of the file, so figures stay comparable across runs. `load_log` also patches the trailing-frame bug described below, so older logs can be pooled with newer ones.
+
+---
+
+## Offline check
+
+```bash
+python eval_sgt_cross.py
+```
+
+Runs the cross-user checkpoints over the calibration data collected by `collect.py` and reports accuracy, active accuracy, balanced accuracy, and macro F1 for each participant, with and without streaming normalization and with and without active-region segmentation. Useful as a sanity check on band placement and signal quality before an online session, and for relating a participant's offline separability to their online performance.
+
+---
+
+## Known issues
+
+- In `fitts.py`, the window closes on the final target before the trailing `writerow` executes, so the last trial of the last condition is logged as a timeout. The fix is a `_close` flag mirroring the existing `_init` pattern. `fitts_analysis.load_log` compensates for logs recorded before that fix.
+- `Replay.py` reads its session selection from module-level constants rather than the command line.
+- Mode A and Mode C have not been exercised since the task parameters were finalised for the ring study.
+
+---
+
+## Related repository
+
+The offline pipeline that produces the cross-user checkpoints, including dataset preparation, architecture and feature comparisons, loss variants, and the within-user references, is in `EPN612_Cross_User`.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See `LICENSE`.
