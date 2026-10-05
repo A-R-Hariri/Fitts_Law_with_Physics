@@ -11,21 +11,18 @@ MODELS = [
     "within_cnnhcf_raw_base-5",
 ]
 
-# tensor(<value>, ...) or just a plain float
 _NUM = r"[-+]?\d*\.?\d+(?:e[-+]?\d+)?"
 _TENSOR = rf"tensor\(({_NUM})[^)]*\)"
 _FLOAT  = _NUM
 
-# (tensor(<acc>,...), <loss>, <bal_acc>, tensor([[...
 LINE_RE = re.compile(
-    rf"\((?:{_TENSOR}|({_FLOAT}))\s*,\s*"   # acc — tensor or plain float
+    rf"\((?:{_TENSOR}|({_FLOAT}))\s*,\s*"   # acc tensor or plain float
     rf"({_FLOAT})\s*,\s*"                    # loss
-    rf"(?:{_TENSOR}|({_FLOAT}))\s*,"         # bal_acc — tensor or plain float
+    rf"(?:{_TENSOR}|({_FLOAT}))\s*,"         # bal_acc tensor or plain float
 )
 
 
 def parse_results(path):
-    """Return dict  model_name -> (acc, bal_acc)  for one results.txt."""
     out = {}
     with open(path) as f:
         text = f.read()
@@ -45,7 +42,7 @@ def parse_results(path):
 
         m = LINE_RE.search(line)
         if m is None:
-            print(f"  [WARN] could not parse: {line[:80]}")
+            print(f"could not parse: {line[:80]}")
             continue
 
         acc_t, acc_p, _loss, bal_t, bal_p = m.groups()
@@ -64,14 +61,14 @@ def main():
     for uid in range(1, N_USERS + 1):
         path = join(USER_SGT_ROOT, str(uid), "results.txt")
         if not exists(path):
-            print(f"[SKIP] User {uid}: results.txt not found")
+            print(f"User {uid}: results.txt not found")
             continue
         parsed = parse_results(path)
         if parsed:
             user_ids.append(uid)
             all_results[uid] = parsed
         else:
-            print(f"[WARN] User {uid}: no entries parsed from {path}")
+            print(f"User {uid}: no entries parsed from {path}")
 
     if not all_results:
         print("No results found. Exiting.")
@@ -79,14 +76,14 @@ def main():
 
     sep = "=" * 72
     print(f"\n{sep}")
-    print(f"Within-user results  (acc / bal_acc, %)   —  {len(user_ids)} users")
+    print(f"Within-user results (acc / bal_acc, %) {len(user_ids)} users")
     print(sep)
 
     # Per-model detailed table
     for model in MODELS:
         print(f"\nModel: {model}")
-        print(f"  {'User':>6}   {'Acc (%)':>9}   {'BalAcc (%)':>11}")
-        print(f"  {'-'*6}   {'-'*9}   {'-'*11}")
+        print(f" {'User':>6} {'Acc (%)':>9} {'BalAcc (%)':>11}")
+        print(f" {'-'*6} {'-'*9} {'-'*11}")
 
         accs, bals = [], []
         for uid in user_ids:
@@ -102,12 +99,12 @@ def main():
         if accs:
             ma, sa = np.mean(accs), np.std(accs, ddof=1)
             mb, sb = np.mean(bals), np.std(bals, ddof=1)
-            print(f"  {'MEAN':>6}   {ma:9.2f}   {mb:11.2f}")
-            print(f"  {'STD':>6}   {sa:9.2f}   {sb:11.2f}")
+            print(f" {'MEAN':>6} {ma:9.2f} {mb:11.2f}")
+            print(f" {'STD':>6} {sa:9.2f} {sb:11.2f}")
 
     # Summary table across all models
     print(f"\n{sep}")
-    print("SUMMARY  (mean ± std across users, %)")
+    print("SUMMARY (mean ± std across users, %)")
     print(f"{'Model':<35} {'Acc':>14} {'BalAcc':>14}")
     print("-" * 64)
     for model in MODELS:
