@@ -18,8 +18,9 @@ from PySide6.QtGui import (
 
 # ======== SESSION SELECTION ========
 
-USER_ID = "3"
+USER_ID = "12"
 # MODEL = "within_cnnhcf_raw_base-5" 
+# MODEL = "within_mhcnn_raw_base-ft-5" 
 MODEL = "cross_mhcnn_segmented_base"
 FITTS_ROOT = "fitts_logs"
 
@@ -644,7 +645,10 @@ class ReplayView(QWidget):
             ticks = []
             for k in range(n_ticks):
                 frac = k / float(n_ticks - 1)
-                ticks.append((frac, "%d" % int(round(frac * self.s.vmax))))
+                ticks.append((frac, "%d" % int(round(frac * 
+                                                     self.s.vmax
+                                                    # 1350
+                                                     ))))
         else:
             title = "Time in trace"
             ticks = [(0.0, "start"), (1.0, "now")]
